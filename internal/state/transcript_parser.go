@@ -2,7 +2,11 @@
 package state
 
 import (
+	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/opencode-ai/swarm/internal/models"
 )
@@ -20,11 +24,15 @@ func ParseTranscript(text string) *models.StateInfo {
 	}
 
 	if containsAny(lower, "rate limit", "too many requests", "quota exceeded", "429") {
-		return &models.StateInfo{
+		info := &models.StateInfo{
 			State:      models.AgentStateRateLimited,
 			Confidence: models.StateConfidenceMedium,
 			Reason:     "rate limit indicator detected in transcript",
 		}
+		if retryAfter, ok := extractRetryAfter(lower); ok {
+			info.Evidence = []string{fmt.Sprintf("retry_after=%s", retryAfter)}
+		}
+		return info
 	}
 
 	if containsAny(lower, "approve", "confirm", "allow", "proceed?", "[y/n]", "(y/n)") {
@@ -36,4 +44,43 @@ func ParseTranscript(text string) *models.StateInfo {
 	}
 
 	return nil
+}
+
+var retryAfterPattern = regexp.MustCompile(`(?i)(retry after|try again in)\s+(\d+)\s*([a-z]+)?`)
+
+func extractRetryAfter(text string) (time.Duration, bool) {
+	match := retryAfterPattern.FindStringSubmatch(text)
+	if len(match) < 3 {
+		return 0, false
+	}
+
+	value, err := strconv.Atoi(match[2])
+	if err != nil {
+		return 0, false
+	}
+
+	unit := normalizeDurationUnit(match[3])
+	if unit == "" {
+		unit = "s"
+	}
+
+	duration, err := time.ParseDuration(fmt.Sprintf("%d%s", value, unit))
+	if err != nil {
+		return 0, false
+	}
+
+	return duration, true
+}
+
+func normalizeDurationUnit(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "s", "sec", "secs", "second", "seconds":
+		return "s"
+	case "m", "min", "mins", "minute", "minutes":
+		return "m"
+	case "h", "hr", "hrs", "hour", "hours":
+		return "h"
+	default:
+		return ""
+	}
 }

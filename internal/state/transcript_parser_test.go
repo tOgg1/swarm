@@ -33,3 +33,16 @@ func TestParseTranscript(t *testing.T) {
 		})
 	}
 }
+
+func TestParseTranscript_RetryAfterEvidence(t *testing.T) {
+	info := ParseTranscript("Rate limit hit. Retry after 45 seconds.")
+	if info == nil {
+		t.Fatal("expected non-nil state info")
+	}
+	if info.State != "rate_limited" {
+		t.Fatalf("expected rate_limited, got %s", info.State)
+	}
+	if len(info.Evidence) != 1 || info.Evidence[0] != "retry_after=45s" {
+		t.Fatalf("expected retry_after evidence, got %+v", info.Evidence)
+	}
+}
