@@ -568,8 +568,12 @@ func (s *Service) getTmuxSessionWorkingDir(ctx context.Context, nodeObj *models.
 		return "", fmt.Errorf("no panes found in tmux session %q", sessionName)
 	}
 
-	// Return the first path as the main working directory
-	return paths[0], nil
+	repoPath, err := detectRepoRootFromPaths(paths)
+	if err != nil {
+		return "", fmt.Errorf("failed to detect repo root from tmux panes: %w", err)
+	}
+
+	return repoPath, nil
 }
 
 // isTmuxSessionActive checks if a tmux session is running.

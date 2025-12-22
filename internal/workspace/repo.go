@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -116,4 +118,144 @@ func runGit(repoPath string, args ...string) (string, string, error) {
 
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+// AmbiguousRepoRootError indicates multiple repo roots were detected.
+type AmbiguousRepoRootError struct {
+	Roots []string
+}
+
+func (e *AmbiguousRepoRootError) Error() string {
+	if len(e.Roots) == 0 {
+		return "ambiguous repository roots"
+	}
+	return fmt.Sprintf("ambiguous repository roots: %s", strings.Join(e.Roots, ", "))
+}
+
+// detectRepoRootFromPaths finds a common repo root for a set of pane paths.
+func detectRepoRootFromPaths(paths []string) (string, error) {
+	cleaned := uniquePaths(paths)
+	if len(cleaned) == 0 {
+		return "", fmt.Errorf("no pane paths provided")
+	}
+
+	var roots []string
+	for _, path := range cleaned {
+		if root, ok := findGitRoot(path); ok {
+			roots = append(roots, root)
+		}
+	}
+
+	roots = uniquePaths(roots)
+	switch len(roots) {
+	case 0:
+		common := commonAncestor(cleaned)
+		if common != "" {
+			return common, nil
+		}
+		return cleaned[0], nil
+	case 1:
+		return roots[0], nil
+	default:
+		common := commonAncestor(roots)
+		if common != "" && isGitRoot(common) {
+			return common, nil
+		}
+		return "", &AmbiguousRepoRootError{Roots: roots}
+	}
+}
+
+func findGitRoot(path string) (string, bool) {
+	current := normalizePath(path)
+	if current == "" {
+		return "", false
+	}
+	for {
+		if isGitRoot(current) {
+			return current, true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return "", false
+}
+
+func isGitRoot(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(path, ".git"))
+	if err != nil {
+		return false
+	}
+	return info.IsDir() || info.Mode().IsRegular()
+}
+
+func normalizePath(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	cleaned := filepath.Clean(path)
+	abs, err := filepath.Abs(cleaned)
+	if err != nil {
+		return cleaned
+	}
+	return abs
+}
+
+func commonAncestor(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	common := normalizePath(paths[0])
+	if common == "" {
+		return ""
+	}
+	for _, path := range paths[1:] {
+		candidate := normalizePath(path)
+		if candidate == "" {
+			continue
+		}
+		for !isPathAncestor(common, candidate) {
+			parent := filepath.Dir(common)
+			if parent == common {
+				return ""
+			}
+			common = parent
+		}
+	}
+	return common
+}
+
+func isPathAncestor(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	separator := string(filepath.Separator)
+	return rel != ".." && !strings.HasPrefix(rel, ".."+separator)
+}
+
+func uniquePaths(paths []string) []string {
+	seen := make(map[string]struct{})
+	unique := make([]string, 0, len(paths))
+	for _, path := range paths {
+		cleaned := normalizePath(path)
+		if cleaned == "" {
+			continue
+		}
+		if _, ok := seen[cleaned]; ok {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		unique = append(unique, cleaned)
+	}
+	sort.Strings(unique)
+	return unique
 }
