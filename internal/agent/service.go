@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opencode-ai/swarm/internal/account"
 	"github.com/opencode-ai/swarm/internal/adapters"
 	"github.com/opencode-ai/swarm/internal/db"
 	"github.com/opencode-ai/swarm/internal/logging"
@@ -36,6 +37,7 @@ type Service struct {
 	repo             *db.AgentRepository
 	queueRepo        *db.QueueRepository
 	workspaceService *workspace.Service
+	accountService   *account.Service
 	tmuxClient       *tmux.Client
 	paneMap          *PaneMap
 	logger           zerolog.Logger
@@ -46,12 +48,14 @@ func NewService(
 	repo *db.AgentRepository,
 	queueRepo *db.QueueRepository,
 	workspaceService *workspace.Service,
+	accountService *account.Service,
 	tmuxClient *tmux.Client,
 ) *Service {
 	return &Service{
 		repo:             repo,
 		queueRepo:        queueRepo,
 		workspaceService: workspaceService,
+		accountService:   accountService,
 		tmuxClient:       tmuxClient,
 		paneMap:          NewPaneMap(),
 		logger:           logging.Component("agent"),
@@ -108,6 +112,22 @@ func (s *Service) SpawnAgent(ctx context.Context, opts SpawnOptions) (*models.Ag
 	workDir := opts.WorkingDir
 	if workDir == "" {
 		workDir = ws.RepoPath
+	}
+
+	// Inject account credentials into environment
+	if opts.AccountID != "" && s.accountService != nil {
+		credEnv, err := s.accountService.GetCredentialEnv(ctx, opts.AccountID)
+		if err != nil {
+			s.logger.Warn().Err(err).
+				Str("account_id", opts.AccountID).
+				Msg("failed to resolve account credentials, continuing without injection")
+		} else if len(credEnv) > 0 {
+			opts.Environment = account.MergeEnv(opts.Environment, credEnv)
+			s.logger.Debug().
+				Str("account_id", opts.AccountID).
+				Int("env_vars", len(credEnv)).
+				Msg("injected account credentials")
+		}
 	}
 
 	// Create a new pane in the workspace's tmux session

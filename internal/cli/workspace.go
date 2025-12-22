@@ -532,7 +532,7 @@ and removing the Swarm record.`,
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
 
 		ws, err := findWorkspace(ctx, wsRepo, idOrName)
 		if err != nil {

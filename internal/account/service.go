@@ -4,6 +4,8 @@ package account
 import (
 	"context"
 	"errors"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -277,4 +279,101 @@ func (s *Service) CheckAndWaitCooldown(ctx context.Context, id string, waitMax t
 		}
 		return account, nil
 	}
+}
+
+// ProviderEnvVar returns the environment variable name for a provider's API key.
+func ProviderEnvVar(provider models.Provider) string {
+	switch provider {
+	case models.ProviderAnthropic:
+		return "ANTHROPIC_API_KEY"
+	case models.ProviderOpenAI:
+		return "OPENAI_API_KEY"
+	case models.ProviderGoogle:
+		return "GOOGLE_API_KEY"
+	default:
+		return ""
+	}
+}
+
+// ResolveCredential resolves a credential reference to its actual value.
+// Credential references can be:
+//   - env:VAR_NAME - reads from environment variable VAR_NAME
+//   - file:/path/to/file - reads from file
+//   - literal value - used as-is (not recommended for production)
+func ResolveCredential(credentialRef string) (string, error) {
+	if credentialRef == "" {
+		return "", errors.New("empty credential reference")
+	}
+
+	// Check for env: prefix
+	if strings.HasPrefix(credentialRef, "env:") {
+		envVar := strings.TrimPrefix(credentialRef, "env:")
+		value := os.Getenv(envVar)
+		if value == "" {
+			return "", errors.New("environment variable " + envVar + " is not set")
+		}
+		return value, nil
+	}
+
+	// Check for file: prefix
+	if strings.HasPrefix(credentialRef, "file:") {
+		filePath := strings.TrimPrefix(credentialRef, "file:")
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return "", errors.New("failed to read credential file: " + err.Error())
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+
+	// Treat as literal value (for backwards compatibility)
+	return credentialRef, nil
+}
+
+// GetCredentialEnv returns the environment variable map for an account's credentials.
+// This can be passed to agent spawn to inject the correct API key.
+func (s *Service) GetCredentialEnv(ctx context.Context, accountID string) (map[string]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	account, exists := s.accounts[accountID]
+	if !exists {
+		return nil, ErrAccountNotFound
+	}
+
+	envVar := ProviderEnvVar(account.Provider)
+	if envVar == "" {
+		// Custom provider - no standard env var
+		s.logger.Debug().
+			Str("account_id", accountID).
+			Str("provider", string(account.Provider)).
+			Msg("no standard env var for provider")
+		return map[string]string{}, nil
+	}
+
+	credential, err := ResolveCredential(account.CredentialRef)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]string{
+		envVar: credential,
+	}, nil
+}
+
+// MergeEnv merges credential environment variables with existing environment.
+// Credential values take precedence over existing values.
+func MergeEnv(base map[string]string, credentials map[string]string) map[string]string {
+	if base == nil {
+		base = make(map[string]string)
+	}
+
+	result := make(map[string]string, len(base)+len(credentials))
+	for k, v := range base {
+		result[k] = v
+	}
+	for k, v := range credentials {
+		result[k] = v
+	}
+
+	return result
 }

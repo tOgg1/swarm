@@ -3,6 +3,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -51,6 +52,10 @@ var (
 	// agent queue flags
 	agentQueueFile       string
 	agentQueuePauseAfter int
+
+	// agent approve flags
+	agentApproveAll  bool
+	agentApproveDeny bool
 )
 
 func init() {
@@ -65,6 +70,7 @@ func init() {
 	agentCmd.AddCommand(agentSendCmd)
 	agentCmd.AddCommand(agentRestartCmd)
 	agentCmd.AddCommand(agentQueueCmd)
+	agentCmd.AddCommand(agentApproveCmd)
 
 	// Spawn flags
 	agentSpawnCmd.Flags().StringVarP(&agentSpawnWorkspace, "workspace", "w", "", "workspace name or ID (required)")
@@ -94,6 +100,10 @@ func init() {
 	// Queue flags
 	agentQueueCmd.Flags().StringVarP(&agentQueueFile, "file", "f", "", "file containing prompts (one per line)")
 	agentQueueCmd.Flags().IntVar(&agentQueuePauseAfter, "pause-after", 0, "insert 60s pause after every N messages (0 = no pauses)")
+
+	// Approve flags
+	agentApproveCmd.Flags().BoolVar(&agentApproveAll, "all", false, "approve or deny all pending approvals for the agent")
+	agentApproveCmd.Flags().BoolVar(&agentApproveDeny, "deny", false, "deny pending approvals instead of approving")
 }
 
 var agentCmd = &cobra.Command{
@@ -137,7 +147,7 @@ The agent will be started in a new tmux pane in the workspace's session.`,
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
 
 		// Find workspace
 		ws, err := findWorkspace(ctx, wsRepo, agentSpawnWorkspace)
@@ -236,7 +246,7 @@ var agentListCmd = &cobra.Command{
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
 
 		// Build options
 		opts := agent.ListAgentsOptions{
@@ -316,7 +326,7 @@ var agentStatusCmd = &cobra.Command{
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
 
 		resolved, err := findAgent(ctx, agentRepo, agentID)
 		if err != nil {
@@ -407,7 +417,7 @@ var agentTerminateCmd = &cobra.Command{
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
 
 		resolved, err := findAgent(ctx, agentRepo, agentID)
 		if err != nil {
@@ -459,7 +469,7 @@ var agentInterruptCmd = &cobra.Command{
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
 
 		resolved, err := findAgent(ctx, agentRepo, agentID)
 		if err != nil {
@@ -513,7 +523,7 @@ var agentPauseCmd = &cobra.Command{
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
 
 		resolved, err := findAgent(ctx, agentRepo, agentID)
 		if err != nil {
@@ -566,7 +576,7 @@ var agentResumeCmd = &cobra.Command{
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
 
 		resolved, err := findAgent(ctx, agentRepo, agentID)
 		if err != nil {
@@ -633,7 +643,7 @@ Provide the message inline, or use --file, --stdin, or --editor to send multi-li
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
 
 		opts := &agent.SendMessageOptions{
 			SkipIdleCheck: agentSendSkipIdle,
@@ -690,7 +700,7 @@ var agentRestartCmd = &cobra.Command{
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
 
 		resolved, err := findAgent(ctx, agentRepo, agentID)
 		if err != nil {
@@ -895,6 +905,93 @@ Special markers in the file:
 		}
 		return nil
 	},
+}
+
+var agentApproveCmd = &cobra.Command{
+	Use:   "approve <agent-id>",
+	Short: "Approve or deny pending approvals",
+	Long: `Handle pending approvals for an agent.
+
+By default, this approves pending requests. Use --deny to deny instead.
+Use --all to apply the action to every pending approval.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := context.Background()
+
+		database, err := openDatabase()
+		if err != nil {
+			return err
+		}
+		defer database.Close()
+
+		agentRepo := db.NewAgentRepository(database)
+		approvalRepo := db.NewApprovalRepository(database)
+
+		agentRecord, err := findAgent(ctx, agentRepo, args[0])
+		if err != nil {
+			return err
+		}
+
+		pending, err := approvalRepo.ListPendingByAgent(ctx, agentRecord.ID)
+		if err != nil {
+			return fmt.Errorf("failed to list pending approvals: %w", err)
+		}
+
+		if len(pending) == 0 {
+			if IsJSONOutput() || IsJSONLOutput() {
+				return WriteOutput(os.Stdout, pending)
+			}
+			fmt.Printf("No pending approvals for agent %s.\n", agentRecord.ID)
+			return nil
+		}
+
+		if len(pending) > 1 && !agentApproveAll {
+			return fmt.Errorf("agent has %d pending approvals; use --all to process all", len(pending))
+		}
+
+		action := models.ApprovalStatusApproved
+		if agentApproveDeny {
+			action = models.ApprovalStatusDenied
+		}
+
+		resolvedAt := time.Now().UTC()
+		updated := make([]*models.Approval, 0, len(pending))
+
+		for _, approval := range pending {
+			if err := approvalRepo.UpdateStatus(ctx, approval.ID, action, "user"); err != nil {
+				return fmt.Errorf("failed to update approval %s: %w", approval.ID, err)
+			}
+			approval.Status = action
+			approval.ResolvedBy = "user"
+			approval.ResolvedAt = &resolvedAt
+			updated = append(updated, approval)
+		}
+
+		if IsJSONOutput() || IsJSONLOutput() {
+			return WriteOutput(os.Stdout, updated)
+		}
+
+		for _, approval := range updated {
+			fmt.Printf("Approval %s: %s\n", approval.ID, approval.RequestType)
+			fmt.Printf("  Status: %s\n", approval.Status)
+			fmt.Printf("  Details:\n%s\n", formatApprovalDetails(approval.RequestDetails))
+		}
+
+		return nil
+	},
+}
+
+func formatApprovalDetails(details json.RawMessage) string {
+	trimmed := strings.TrimSpace(string(details))
+	if trimmed == "" {
+		return "    (none)"
+	}
+
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, []byte(trimmed), "    ", "  "); err != nil {
+		return "    " + trimmed
+	}
+	return pretty.String()
 }
 
 func resolveSendMessage(args []string) (string, error) {
