@@ -93,6 +93,7 @@ swarm ws create --path /path/to/repo --node local
 swarm ws import --session repo-session --node local
 swarm ws list
 swarm ws status <id-or-name>
+swarm ws beads-status <id-or-name>
 swarm ws attach <id-or-name>
 swarm ws remove <id-or-name> --destroy
 swarm ws refresh [id-or-name]

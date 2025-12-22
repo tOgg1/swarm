@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 
 	"github.com/opencode-ai/swarm/internal/agent"
+	"github.com/opencode-ai/swarm/internal/beads"
 	"github.com/opencode-ai/swarm/internal/db"
 	"github.com/opencode-ai/swarm/internal/models"
 	"github.com/opencode-ai/swarm/internal/node"
@@ -48,6 +50,7 @@ func init() {
 	wsCmd.AddCommand(wsImportCmd)
 	wsCmd.AddCommand(wsListCmd)
 	wsCmd.AddCommand(wsStatusCmd)
+	wsCmd.AddCommand(wsBeadsStatusCmd)
 	wsCmd.AddCommand(wsAttachCmd)
 	wsCmd.AddCommand(wsRemoveCmd)
 	wsCmd.AddCommand(wsKillCmd)
@@ -390,6 +393,103 @@ var wsStatusCmd = &cobra.Command{
 	},
 }
 
+type beadsStatusReport struct {
+	Workspace      *models.Workspace   `json:"workspace"`
+	IssuesPath     string              `json:"issues_path"`
+	Tasks          []beads.TaskSummary `json:"tasks"`
+	StatusCounts   map[string]int      `json:"status_counts"`
+	PriorityCounts map[int]int         `json:"priority_counts"`
+	Total          int                 `json:"total"`
+}
+
+var wsBeadsStatusCmd = &cobra.Command{
+	Use:   "beads-status <id-or-name>",
+	Short: "Show beads issue status for a workspace",
+	Long:  "Export beads issue status from the workspace .beads/issues.jsonl file.",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := context.Background()
+		idOrName := args[0]
+
+		database, err := openDatabase()
+		if err != nil {
+			return err
+		}
+		defer database.Close()
+
+		wsRepo := db.NewWorkspaceRepository(database)
+		ws, err := findWorkspace(ctx, wsRepo, idOrName)
+		if err != nil {
+			return err
+		}
+
+		issuesPath := beads.IssuesPath(ws.RepoPath)
+		issues, err := beads.LoadIssues(issuesPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("no beads issues file found at %s", issuesPath)
+			}
+			return fmt.Errorf("failed to read beads issues: %w", err)
+		}
+
+		summaries := beads.Summaries(issues)
+		sort.Slice(summaries, func(i, j int) bool {
+			left := summaries[i]
+			right := summaries[j]
+
+			if beadsStatusRank(left.Status) != beadsStatusRank(right.Status) {
+				return beadsStatusRank(left.Status) < beadsStatusRank(right.Status)
+			}
+			if left.Priority != right.Priority {
+				return left.Priority < right.Priority
+			}
+			return left.ID < right.ID
+		})
+
+		statusCounts, priorityCounts := summarizeBeadsCounts(summaries)
+		report := beadsStatusReport{
+			Workspace:      ws,
+			IssuesPath:     issuesPath,
+			Tasks:          summaries,
+			StatusCounts:   statusCounts,
+			PriorityCounts: priorityCounts,
+			Total:          len(summaries),
+		}
+
+		if IsJSONOutput() || IsJSONLOutput() {
+			return WriteOutput(os.Stdout, report)
+		}
+
+		fmt.Printf("Workspace: %s (%s)\n", ws.Name, ws.ID)
+		fmt.Printf("Path:      %s\n", ws.RepoPath)
+		fmt.Printf("Beads:     %s\n", issuesPath)
+		fmt.Printf("Total:     %d\n", report.Total)
+		fmt.Printf("Status:    open=%d in_progress=%d closed=%d\n",
+			statusCounts["open"], statusCounts["in_progress"], statusCounts["closed"])
+		fmt.Printf("Priority:  P0=%d P1=%d P2=%d P3=%d P4=%d\n",
+			priorityCounts[0], priorityCounts[1], priorityCounts[2], priorityCounts[3], priorityCounts[4])
+		fmt.Println()
+
+		if len(summaries) == 0 {
+			fmt.Println("No beads issues found.")
+			return nil
+		}
+
+		rows := make([][]string, 0, len(summaries))
+		for _, task := range summaries {
+			rows = append(rows, []string{
+				task.ID,
+				task.Status,
+				fmt.Sprintf("P%d", task.Priority),
+				task.IssueType,
+				task.Title,
+			})
+		}
+
+		return writeTable(os.Stdout, []string{"ID", "STATUS", "PRIORITY", "TYPE", "TITLE"}, rows)
+	},
+}
+
 var wsAttachCmd = &cobra.Command{
 	Use:   "attach <id-or-name>",
 	Short: "Attach to workspace tmux session",
@@ -637,6 +737,33 @@ var wsRefreshCmd = &cobra.Command{
 
 		return nil
 	},
+}
+
+func beadsStatusRank(status string) int {
+	switch status {
+	case "open":
+		return 0
+	case "in_progress":
+		return 1
+	case "blocked":
+		return 2
+	case "closed":
+		return 3
+	default:
+		return 99
+	}
+}
+
+func summarizeBeadsCounts(tasks []beads.TaskSummary) (map[string]int, map[int]int) {
+	statusCounts := map[string]int{}
+	priorityCounts := map[int]int{}
+
+	for _, task := range tasks {
+		statusCounts[task.Status]++
+		priorityCounts[task.Priority]++
+	}
+
+	return statusCounts, priorityCounts
 }
 
 // truncatePath truncates a path for display.
