@@ -24,6 +24,10 @@ type AgentRepository struct {
 	db *DB
 }
 
+type agentExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 // NewAgentRepository creates a new AgentRepository.
 func NewAgentRepository(db *DB) *AgentRepository {
 	return &AgentRepository{db: db}
@@ -191,6 +195,35 @@ func (r *AgentRepository) ListWithQueueLength(ctx context.Context) ([]*models.Ag
 
 // Update updates an existing agent.
 func (r *AgentRepository) Update(ctx context.Context, agent *models.Agent) error {
+	return r.updateWithExecutor(ctx, r.db, agent)
+}
+
+// UpdateWithTx updates an agent using an existing transaction.
+func (r *AgentRepository) UpdateWithTx(ctx context.Context, tx *sql.Tx, agent *models.Agent) error {
+	if tx == nil {
+		return fmt.Errorf("transaction is required")
+	}
+	return r.updateWithExecutor(ctx, tx, agent)
+}
+
+// UpdateWithEvent updates an agent and creates an event atomically.
+func (r *AgentRepository) UpdateWithEvent(ctx context.Context, agent *models.Agent, event *models.Event, eventRepo *EventRepository) error {
+	if event == nil || eventRepo == nil {
+		return r.Update(ctx, agent)
+	}
+
+	return r.db.Transaction(ctx, func(tx *sql.Tx) error {
+		if err := r.updateWithExecutor(ctx, tx, agent); err != nil {
+			return err
+		}
+		if err := eventRepo.CreateWithTx(ctx, tx, event); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+func (r *AgentRepository) updateWithExecutor(ctx context.Context, execer agentExecer, agent *models.Agent) error {
 	if err := agent.Validate(); err != nil {
 		return fmt.Errorf("invalid agent: %w", err)
 	}
@@ -215,7 +248,7 @@ func (r *AgentRepository) Update(ctx context.Context, agent *models.Agent) error
 	pausedUntil := stringTimePtr(agent.PausedUntil)
 	lastActivity := stringTimePtr(agent.LastActivity)
 
-	result, err := r.db.ExecContext(ctx, `
+	result, err := execer.ExecContext(ctx, `
 		UPDATE agents SET
 			workspace_id = ?,
 			type = ?,

@@ -201,3 +201,114 @@ func TestAgentRepository_ListWithQueueLength(t *testing.T) {
 		t.Errorf("expected queue length 1, got %d", found.QueueLength)
 	}
 }
+
+func TestAgentRepository_UpdateWithEventAtomic(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	ctx := context.Background()
+	repo := NewAgentRepository(db)
+	eventRepo := NewEventRepository(db)
+	ws := createTestWorkspace(t, db)
+
+	agent := &models.Agent{
+		WorkspaceID: ws.ID,
+		Type:        models.AgentTypeOpenCode,
+		TmuxPane:    "swarm:0.1",
+		State:       models.AgentStateIdle,
+		StateInfo: models.StateInfo{
+			State:      models.AgentStateIdle,
+			Confidence: models.StateConfidenceHigh,
+			Reason:     "initial",
+			DetectedAt: time.Now().UTC(),
+		},
+	}
+
+	if err := repo.Create(ctx, agent); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	// Attempt update with invalid event to force rollback.
+	now := time.Now().UTC()
+	agent.State = models.AgentStateWorking
+	agent.StateInfo = models.StateInfo{
+		State:      models.AgentStateWorking,
+		Confidence: models.StateConfidenceMedium,
+		Reason:     "test",
+		DetectedAt: now,
+	}
+	agent.LastActivity = &now
+
+	invalidEvent := &models.Event{
+		EntityType: models.EntityTypeAgent,
+		EntityID:   agent.ID,
+	}
+	if err := repo.UpdateWithEvent(ctx, agent, invalidEvent, eventRepo); err == nil {
+		t.Fatalf("expected error from invalid event")
+	}
+
+	// Verify state was not updated.
+	stored, err := repo.Get(ctx, agent.ID)
+	if err != nil {
+		t.Fatalf("get agent: %v", err)
+	}
+	if stored.State != models.AgentStateIdle {
+		t.Fatalf("expected state to remain idle, got %s", stored.State)
+	}
+
+	events, err := eventRepo.ListByEntity(ctx, models.EntityTypeAgent, agent.ID, 10)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected no events, got %d", len(events))
+	}
+
+	// Now update with a valid event.
+	now = time.Now().UTC()
+	agent.State = models.AgentStateWorking
+	agent.StateInfo = models.StateInfo{
+		State:      models.AgentStateWorking,
+		Confidence: models.StateConfidenceMedium,
+		Reason:     "test",
+		DetectedAt: now,
+	}
+	agent.LastActivity = &now
+
+	payload, err := json.Marshal(models.StateChangedPayload{
+		OldState:   models.AgentStateIdle,
+		NewState:   models.AgentStateWorking,
+		Confidence: models.StateConfidenceMedium,
+		Reason:     "test",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	validEvent := &models.Event{
+		Type:       models.EventTypeAgentStateChanged,
+		EntityType: models.EntityTypeAgent,
+		EntityID:   agent.ID,
+		Payload:    payload,
+		Timestamp:  now,
+	}
+	if err := repo.UpdateWithEvent(ctx, agent, validEvent, eventRepo); err != nil {
+		t.Fatalf("update with event: %v", err)
+	}
+
+	stored, err = repo.Get(ctx, agent.ID)
+	if err != nil {
+		t.Fatalf("get agent: %v", err)
+	}
+	if stored.State != models.AgentStateWorking {
+		t.Fatalf("expected state working, got %s", stored.State)
+	}
+
+	events, err = eventRepo.ListByEntity(ctx, models.EntityTypeAgent, agent.ID, 10)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+}

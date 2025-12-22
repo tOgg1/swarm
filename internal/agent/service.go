@@ -40,6 +40,9 @@ type Service struct {
 	workspaceService *workspace.Service
 	accountService   *account.Service
 	tmuxClient       *tmux.Client
+	eventRepo        *db.EventRepository
+	archiveDir       string
+	archiveAfter     time.Duration
 	paneMap          *PaneMap
 	publisher        events.Publisher
 	logger           zerolog.Logger
@@ -52,6 +55,27 @@ type ServiceOption func(*Service)
 func WithPublisher(publisher events.Publisher) ServiceOption {
 	return func(s *Service) {
 		s.publisher = publisher
+	}
+}
+
+// WithEventRepository configures an event repository for archiving.
+func WithEventRepository(repo *db.EventRepository) ServiceOption {
+	return func(s *Service) {
+		s.eventRepo = repo
+	}
+}
+
+// WithArchiveDir configures the archive directory for agent logs.
+func WithArchiveDir(path string) ServiceOption {
+	return func(s *Service) {
+		s.archiveDir = strings.TrimSpace(path)
+	}
+}
+
+// WithArchiveAfter configures how long to keep archives uncompressed.
+func WithArchiveAfter(duration time.Duration) ServiceOption {
+	return func(s *Service) {
+		s.archiveAfter = duration
 	}
 }
 
@@ -72,6 +96,7 @@ func NewService(
 		tmuxClient:       tmuxClient,
 		paneMap:          NewPaneMap(),
 		logger:           logging.Component("agent"),
+		archiveAfter:     defaultArchiveAfter,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -147,8 +172,16 @@ func (s *Service) SpawnAgent(ctx context.Context, opts SpawnOptions) (*models.Ag
 		}
 	}
 
-	// Create a new pane in the workspace's tmux session
-	paneID, err := s.tmuxClient.SplitWindow(ctx, ws.TmuxSession, false, workDir)
+	// Create a new pane in the workspace's tmux session (prefer the agents window).
+	splitTarget := ws.TmuxSession
+	if ws.TmuxSession != "" {
+		splitTarget = fmt.Sprintf("%s:%s", ws.TmuxSession, tmux.AgentWindowName)
+	}
+	paneID, err := s.tmuxClient.SplitWindow(ctx, splitTarget, false, workDir)
+	if err != nil && splitTarget != ws.TmuxSession {
+		s.logger.Debug().Err(err).Str("target", splitTarget).Msg("failed to split agents window, falling back to session")
+		paneID, err = s.tmuxClient.SplitWindow(ctx, ws.TmuxSession, false, workDir)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%w: failed to create pane: %v", ErrSpawnFailed, err)
 	}
@@ -355,6 +388,22 @@ func (s *Service) cleanupSpawnFailure(ctx context.Context, agent *models.Agent) 
 
 	if err := s.paneMap.UnregisterAgent(agent.ID); err != nil && !errors.Is(err, ErrAgentNotFound) {
 		s.logger.Warn().Err(err).Str("agent_id", agent.ID).Msg("failed to unregister pane mapping after spawn failure")
+	}
+}
+
+func (s *Service) cleanupRestartFailure(ctx context.Context, agent *models.Agent) {
+	if agent == nil {
+		return
+	}
+
+	if agent.TmuxPane != "" {
+		if err := s.tmuxClient.KillPane(ctx, agent.TmuxPane); err != nil {
+			s.logger.Warn().Err(err).Str("agent_id", agent.ID).Msg("failed to kill pane after restart failure")
+		}
+	}
+
+	if err := s.paneMap.UnregisterAgent(agent.ID); err != nil && !errors.Is(err, ErrAgentNotFound) {
+		s.logger.Warn().Err(err).Str("agent_id", agent.ID).Msg("failed to unregister pane mapping after restart failure")
 	}
 }
 
@@ -647,6 +696,134 @@ func (s *Service) RestartAgent(ctx context.Context, id string) (*models.Agent, e
 	return newAgent, nil
 }
 
+// RestartAgentWithAccount restarts an agent using a new account without clearing the queue.
+func (s *Service) RestartAgentWithAccount(ctx context.Context, id, accountID string) (*models.Agent, error) {
+	s.logger.Debug().
+		Str("agent_id", id).
+		Str("account_id", accountID).
+		Msg("restarting agent with new account")
+
+	if accountID == "" {
+		return nil, fmt.Errorf("account id is required")
+	}
+
+	agent, err := s.GetAgent(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	ws, err := s.workspaceService.GetWorkspace(ctx, agent.WorkspaceID)
+	if err != nil {
+		if errors.Is(err, workspace.ErrWorkspaceNotFound) {
+			return nil, ErrWorkspaceNotFound
+		}
+		return nil, fmt.Errorf("failed to get workspace: %w", err)
+	}
+
+	workDir := ws.RepoPath
+
+	env := agent.Metadata.Environment
+	if s.accountService != nil {
+		credEnv, err := s.accountService.GetCredentialEnv(ctx, accountID)
+		if err != nil {
+			s.logger.Warn().Err(err).
+				Str("account_id", accountID).
+				Msg("failed to resolve account credentials, continuing without injection")
+		} else if len(credEnv) > 0 {
+			env = account.MergeEnv(env, credEnv)
+			s.logger.Debug().
+				Str("account_id", accountID).
+				Int("env_vars", len(credEnv)).
+				Msg("injected account credentials")
+		}
+	}
+
+	if agent.TmuxPane != "" {
+		_ = s.tmuxClient.SendInterrupt(ctx, agent.TmuxPane)
+		time.Sleep(100 * time.Millisecond)
+		if err := s.tmuxClient.KillPane(ctx, agent.TmuxPane); err != nil {
+			s.logger.Warn().Err(err).Str("agent_id", id).Msg("failed to kill pane during restart")
+		}
+	}
+
+	splitTarget := ws.TmuxSession
+	if ws.TmuxSession != "" {
+		splitTarget = fmt.Sprintf("%s:%s", ws.TmuxSession, tmux.AgentWindowName)
+	}
+	paneID, err := s.tmuxClient.SplitWindow(ctx, splitTarget, false, workDir)
+	if err != nil && splitTarget != ws.TmuxSession {
+		s.logger.Debug().Err(err).Str("target", splitTarget).Msg("failed to split agents window, falling back to session")
+		paneID, err = s.tmuxClient.SplitWindow(ctx, ws.TmuxSession, false, workDir)
+	}
+	if err != nil {
+		s.markAgentError(ctx, agent, err.Error(), models.StateConfidenceLow, nil)
+		return nil, fmt.Errorf("%w: failed to create pane: %v", ErrSpawnFailed, err)
+	}
+
+	paneTarget := fmt.Sprintf("%s:%s", ws.TmuxSession, paneID)
+
+	now := time.Now().UTC()
+	agent.TmuxPane = paneTarget
+	agent.AccountID = accountID
+	agent.State = models.AgentStateStarting
+	agent.StateInfo = models.StateInfo{
+		State:      models.AgentStateStarting,
+		Confidence: models.StateConfidenceHigh,
+		Reason:     "Agent restarting with new account",
+		DetectedAt: now,
+	}
+	agent.Metadata.Environment = env
+	agent.LastActivity = &now
+
+	if err := s.repo.Update(ctx, agent); err != nil {
+		_ = s.tmuxClient.KillPane(ctx, paneTarget)
+		return nil, fmt.Errorf("failed to update agent for restart: %w", err)
+	}
+
+	if err := s.paneMap.Register(agent.ID, paneID, paneTarget); err != nil {
+		s.logger.Warn().Err(err).Str("agent_id", agent.ID).Msg("failed to register pane mapping")
+	}
+
+	opts := SpawnOptions{
+		WorkspaceID: agent.WorkspaceID,
+		Type:        agent.Type,
+		AccountID:   accountID,
+		Environment: env,
+		WorkingDir:  workDir,
+	}
+
+	startCmd := s.buildStartCommand(opts)
+	if startCmd != "" {
+		if err := s.tmuxClient.SendKeys(ctx, paneTarget, startCmd, true, true); err != nil {
+			spawnErr := fmt.Errorf("failed to send start command: %w", err)
+			s.logger.Warn().Err(spawnErr).Str("agent_id", agent.ID).Msg("agent restart failed")
+			s.markAgentError(ctx, agent, spawnErr.Error(), models.StateConfidenceLow, nil)
+			s.cleanupRestartFailure(ctx, agent)
+			return nil, fmt.Errorf("%w: %v", ErrSpawnFailed, spawnErr)
+		}
+		agent.Metadata.StartCommand = startCmd
+		if err := s.repo.Update(ctx, agent); err != nil {
+			s.logger.Warn().Err(err).Str("agent_id", agent.ID).Msg("failed to store restart start command")
+		}
+	}
+
+	if err := s.waitForReady(ctx, agent, opts); err != nil {
+		s.logger.Warn().Err(err).Str("agent_id", agent.ID).Msg("agent failed to reach ready state after restart")
+		s.markAgentError(ctx, agent, err.Error(), models.StateConfidenceLow, nil)
+		s.cleanupRestartFailure(ctx, agent)
+		return nil, fmt.Errorf("%w: %v", ErrSpawnFailed, err)
+	}
+
+	s.logger.Info().
+		Str("agent_id", agent.ID).
+		Str("account_id", accountID).
+		Msg("agent restarted with new account")
+
+	s.publishEvent(ctx, models.EventTypeAgentRestarted, agent.ID, nil)
+
+	return agent, nil
+}
+
 // TerminateAgent stops and removes an agent.
 func (s *Service) TerminateAgent(ctx context.Context, id string) error {
 	s.logger.Debug().Str("agent_id", id).Msg("terminating agent")
@@ -656,16 +833,35 @@ func (s *Service) TerminateAgent(ctx context.Context, id string) error {
 		return err
 	}
 
+	archiveEnabled := s.archiveEnabled()
+	var transcript string
+	var transcriptAt time.Time
+	var transcriptErr error
+
 	// Send interrupt first to gracefully stop
 	if agent.TmuxPane != "" {
-		_ = s.tmuxClient.SendInterrupt(ctx, agent.TmuxPane)
+		if s.tmuxClient == nil {
+			if archiveEnabled {
+				transcriptErr = errors.New("tmux client not configured")
+			}
+		} else {
+			_ = s.tmuxClient.SendInterrupt(ctx, agent.TmuxPane)
+		}
 		time.Sleep(100 * time.Millisecond)
 
+		if archiveEnabled && s.tmuxClient != nil {
+			transcript, transcriptAt, transcriptErr = s.captureTranscript(ctx, agent.TmuxPane)
+		}
+
 		// Kill the pane
-		if err := s.tmuxClient.KillPane(ctx, agent.TmuxPane); err != nil {
-			s.logger.Warn().Err(err).Str("agent_id", id).Msg("failed to kill pane")
+		if s.tmuxClient != nil {
+			if err := s.tmuxClient.KillPane(ctx, agent.TmuxPane); err != nil {
+				s.logger.Warn().Err(err).Str("agent_id", id).Msg("failed to kill pane")
+			}
 		}
 	}
+
+	s.archiveAgentLogs(ctx, agent, transcript, transcriptAt, transcriptErr)
 
 	// Clear the agent's queue
 	if s.queueRepo != nil {
@@ -862,6 +1058,12 @@ type SendMessageOptions struct {
 	RetryBackoff time.Duration
 }
 
+const (
+	multiLineSendDelay = 50 * time.Millisecond
+	pasteStartSequence = "\x1b[200~"
+	pasteEndSequence   = "\x1b[201~"
+)
+
 // SendMessage sends a message to an agent.
 // By default, it verifies the agent is in an idle state before sending.
 // The message is sent via the adapter for proper formatting.
@@ -935,7 +1137,9 @@ func (s *Service) SendMessage(ctx context.Context, id, message string, opts *Sen
 		}
 
 		// Send the message
-		if opts.WaitForStable {
+		if strings.Contains(message, "\n") || strings.Contains(message, "\r") {
+			lastErr = s.sendMultilineMessage(ctx, agent.TmuxPane, message, opts)
+		} else if opts.WaitForStable {
 			stableRounds := opts.StableRounds
 			if stableRounds <= 0 {
 				stableRounds = 3
@@ -982,6 +1186,67 @@ func (s *Service) SendMessage(ctx context.Context, id, message string, opts *Sen
 		Msg("message sent to agent")
 
 	return nil
+}
+
+func (s *Service) sendMultilineMessage(ctx context.Context, pane, message string, opts *SendMessageOptions) error {
+	normalized := normalizeNewlines(message)
+	lines := strings.Split(normalized, "\n")
+
+	if err := s.tmuxClient.SendKeys(ctx, pane, pasteStartSequence, true, false); err != nil {
+		return err
+	}
+
+	for i, line := range lines {
+		if err := s.tmuxClient.SendKeys(ctx, pane, line, true, false); err != nil {
+			return err
+		}
+		if i < len(lines)-1 {
+			if err := s.tmuxClient.SendKeys(ctx, pane, "\n", true, false); err != nil {
+				return err
+			}
+			if multiLineSendDelay > 0 {
+				if !sleepWithContext(ctx, multiLineSendDelay) {
+					return ctx.Err()
+				}
+			}
+		}
+	}
+
+	if err := s.tmuxClient.SendKeys(ctx, pane, pasteEndSequence, true, false); err != nil {
+		return err
+	}
+
+	if opts != nil && opts.WaitForStable {
+		stableRounds := opts.StableRounds
+		if stableRounds <= 0 {
+			stableRounds = 3
+		}
+		_, err := s.tmuxClient.SendAndWait(ctx, pane, "", true, true, stableRounds)
+		return err
+	}
+
+	return s.tmuxClient.SendKeys(ctx, pane, "", true, true)
+}
+
+func normalizeNewlines(message string) string {
+	if message == "" {
+		return message
+	}
+
+	normalized := strings.ReplaceAll(message, "\r\n", "\n")
+	return strings.ReplaceAll(normalized, "\r", "\n")
+}
+
+func sleepWithContext(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // publishEvent publishes an event if a publisher is configured.
