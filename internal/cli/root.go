@@ -18,6 +18,8 @@ var (
 	jsonlOutput bool
 	watchMode   bool
 	verbose     bool
+	logLevel    string
+	logFormat   string
 
 	// Global config loader and config
 	configLoader *config.Loader
@@ -63,6 +65,8 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&jsonlOutput, "jsonl", false, "output in JSON Lines format (for streaming)")
 	rootCmd.PersistentFlags().BoolVar(&watchMode, "watch", false, "watch for changes and stream updates")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose output")
+	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "", "override logging level (debug, info, warn, error)")
+	rootCmd.PersistentFlags().StringVar(&logFormat, "log-format", "", "override logging format (json, console)")
 }
 
 // initConfig loads configuration using Viper with proper precedence:
@@ -75,14 +79,6 @@ func initConfig() {
 		configLoader.SetConfigFile(cfgFile)
 	}
 
-	// Bind CLI flags to Viper for precedence
-	v := configLoader.Viper()
-
-	// Bind verbose flag to logging level
-	if verbose {
-		v.Set("logging.level", "debug")
-	}
-
 	// Load configuration
 	var err error
 	appConfig, err = configLoader.Load()
@@ -90,6 +86,8 @@ func initConfig() {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
+
+	applyCLIOverrides()
 
 	// Initialize logging based on config
 	initLogging()
@@ -102,6 +100,20 @@ func initConfig() {
 	// Log config file used (if any)
 	if cfgUsed := configLoader.ConfigFileUsed(); cfgUsed != "" {
 		logger.Debug().Str("config_file", cfgUsed).Msg("loaded config file")
+	}
+}
+
+func applyCLIOverrides() {
+	flags := rootCmd.PersistentFlags()
+
+	if flags.Changed("log-level") {
+		appConfig.Logging.Level = logLevel
+	} else if verbose {
+		appConfig.Logging.Level = "debug"
+	}
+
+	if flags.Changed("log-format") {
+		appConfig.Logging.Format = logFormat
 	}
 }
 
