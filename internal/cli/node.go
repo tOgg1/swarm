@@ -99,13 +99,22 @@ var nodeListCmd = &cobra.Command{
 		}
 
 		if !IsJSONOutput() && !IsJSONLOutput() {
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tNAME\tSTATUS\tLOCAL\tSSH TARGET\tAGENTS")
+			rows := make([][]string, 0, len(nodes))
 			for _, n := range nodes {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%v\t%s\t%d\n",
-					n.ID, n.Name, n.Status, n.IsLocal, n.SSHTarget, n.AgentCount)
+				sshTarget := n.SSHTarget
+				if sshTarget == "" {
+					sshTarget = "-"
+				}
+				rows = append(rows, []string{
+					n.Name,
+					shortID(n.ID),
+					formatNodeStatus(n.Status),
+					formatYesNo(n.IsLocal),
+					sshTarget,
+					fmt.Sprintf("%d", n.AgentCount),
+				})
 			}
-			return w.Flush()
+			return writeTable(os.Stdout, []string{"NAME", "ID", "STATUS", "LOCAL", "SSH", "AGENTS"}, rows)
 		}
 
 		return WriteOutput(os.Stdout, nodes)
@@ -212,18 +221,9 @@ This does not stop agents running on the node.`,
 		repo := db.NewNodeRepository(database)
 		service := node.NewService(repo)
 
-		// Find node by name or ID
-		n, err := service.GetNodeByName(ctx, nameOrID)
+		n, err := findNode(ctx, service, nameOrID)
 		if err != nil {
-			if errors.Is(err, node.ErrNodeNotFound) {
-				// Try by ID
-				n, err = service.GetNode(ctx, nameOrID)
-				if err != nil {
-					return fmt.Errorf("node '%s' not found", nameOrID)
-				}
-			} else {
-				return fmt.Errorf("failed to get node: %w", err)
-			}
+			return err
 		}
 
 		// Check for workspaces
@@ -272,24 +272,19 @@ For local nodes, uses the local package manager.`,
 		repo := db.NewNodeRepository(database)
 		service := node.NewService(repo)
 
-		// Find node
-		n, err := service.GetNodeByName(ctx, nameOrID)
+		n, err := findNode(ctx, service, nameOrID)
 		if err != nil {
-			if errors.Is(err, node.ErrNodeNotFound) {
-				n, err = service.GetNode(ctx, nameOrID)
-				if err != nil {
-					return fmt.Errorf("node '%s' not found", nameOrID)
-				}
-			} else {
-				return fmt.Errorf("failed to get node: %w", err)
-			}
+			return err
 		}
 
 		// Run doctor first to see what's missing
+		step := startProgress("Running node diagnostics")
 		report, err := service.Doctor(ctx, n)
 		if err != nil {
+			step.Fail(err)
 			return fmt.Errorf("failed to diagnose node: %w", err)
 		}
+		step.Done()
 
 		// Display what needs bootstrapping
 		if IsJSONOutput() || IsJSONLOutput() {
@@ -360,23 +355,18 @@ Checks include:
 		repo := db.NewNodeRepository(database)
 		service := node.NewService(repo)
 
-		// Find node
-		n, err := service.GetNodeByName(ctx, nameOrID)
+		n, err := findNode(ctx, service, nameOrID)
 		if err != nil {
-			if errors.Is(err, node.ErrNodeNotFound) {
-				n, err = service.GetNode(ctx, nameOrID)
-				if err != nil {
-					return fmt.Errorf("node '%s' not found", nameOrID)
-				}
-			} else {
-				return fmt.Errorf("failed to get node: %w", err)
-			}
+			return err
 		}
 
+		step := startProgress("Running node diagnostics")
 		report, err := service.Doctor(ctx, n)
 		if err != nil {
+			step.Fail(err)
 			return fmt.Errorf("failed to run diagnostics: %w", err)
 		}
+		step.Done()
 
 		if IsJSONOutput() || IsJSONLOutput() {
 			return WriteOutput(os.Stdout, report)
@@ -444,16 +434,9 @@ If no node is specified, refreshes all nodes.`,
 		if len(args) > 0 {
 			// Refresh specific node
 			nameOrID := args[0]
-			n, err := service.GetNodeByName(ctx, nameOrID)
+			n, err := findNode(ctx, service, nameOrID)
 			if err != nil {
-				if errors.Is(err, node.ErrNodeNotFound) {
-					n, err = service.GetNode(ctx, nameOrID)
-					if err != nil {
-						return fmt.Errorf("node '%s' not found", nameOrID)
-					}
-				} else {
-					return fmt.Errorf("failed to get node: %w", err)
-				}
+				return err
 			}
 			nodesToRefresh = []*models.Node{n}
 		} else {
@@ -583,17 +566,9 @@ The command must be specified after the -- separator.`,
 		repo := db.NewNodeRepository(database)
 		service := node.NewService(repo)
 
-		// Find node by name or ID
-		n, err := service.GetNodeByName(ctx, nameOrID)
+		n, err := findNode(ctx, service, nameOrID)
 		if err != nil {
-			if errors.Is(err, node.ErrNodeNotFound) {
-				n, err = service.GetNode(ctx, nameOrID)
-				if err != nil {
-					return fmt.Errorf("node '%s' not found", nameOrID)
-				}
-			} else {
-				return fmt.Errorf("failed to get node: %w", err)
-			}
+			return err
 		}
 
 		// Apply timeout

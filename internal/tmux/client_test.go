@@ -248,7 +248,7 @@ func TestKillSession_NotFound(t *testing.T) {
 }
 
 func TestListPanes(t *testing.T) {
-	exec := &fakeExecutor{stdout: []byte("%1|0|/home/user/project|1\n%2|1|/home/user/project|0\n")}
+	exec := &fakeExecutor{stdout: []byte("%1|0|0|/home/user/project|1\n%2|0|1|/home/user/project|0\n")}
 	client := NewClient(exec)
 
 	panes, err := client.ListPanes(context.Background(), "my-session")
@@ -258,10 +258,10 @@ func TestListPanes(t *testing.T) {
 	if len(panes) != 2 {
 		t.Fatalf("expected 2 panes, got %d", len(panes))
 	}
-	if panes[0].ID != "%1" || panes[0].Index != 0 || !panes[0].Active {
+	if panes[0].ID != "%1" || panes[0].WindowIndex != 0 || panes[0].Index != 0 || !panes[0].Active {
 		t.Errorf("unexpected first pane: %+v", panes[0])
 	}
-	if panes[1].ID != "%2" || panes[1].Index != 1 || panes[1].Active {
+	if panes[1].ID != "%2" || panes[1].WindowIndex != 0 || panes[1].Index != 1 || panes[1].Active {
 		t.Errorf("unexpected second pane: %+v", panes[1])
 	}
 }

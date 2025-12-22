@@ -7,9 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/opencode-ai/swarm/internal/agent"
@@ -43,6 +44,9 @@ var (
 
 	// agent send flags
 	agentSendSkipIdle bool
+	agentSendFile     string
+	agentSendStdin    bool
+	agentSendEditor   bool
 
 	// agent queue flags
 	agentQueueFile       string
@@ -83,6 +87,9 @@ func init() {
 
 	// Send flags
 	agentSendCmd.Flags().BoolVar(&agentSendSkipIdle, "skip-idle-check", false, "send even if agent is not idle")
+	agentSendCmd.Flags().StringVarP(&agentSendFile, "file", "f", "", "read message from file")
+	agentSendCmd.Flags().BoolVar(&agentSendStdin, "stdin", false, "read message from stdin")
+	agentSendCmd.Flags().BoolVar(&agentSendEditor, "editor", false, "compose message in $EDITOR")
 
 	// Queue flags
 	agentQueueCmd.Flags().StringVarP(&agentQueueFile, "file", "f", "", "file containing prompts (one per line)")
@@ -162,8 +169,10 @@ The agent will be started in a new tmux pane in the workspace's session.`,
 				opts.ReadyTimeout = 1 * time.Millisecond
 			}
 
+			step := startProgress(fmt.Sprintf("Spawning agent %d/%d", i+1, agentSpawnCount))
 			a, err := agentService.SpawnAgent(ctx, opts)
 			if err != nil {
+				step.Fail(err)
 				if len(agents) > 0 {
 					// Partial success
 					if !IsJSONOutput() && !IsJSONLOutput() {
@@ -173,6 +182,7 @@ The agent will be started in a new tmux pane in the workspace's session.`,
 				}
 				return fmt.Errorf("failed to spawn agent: %w", err)
 			}
+			step.Done()
 			agents = append(agents, a)
 		}
 
@@ -260,13 +270,26 @@ var agentListCmd = &cobra.Command{
 			return nil
 		}
 
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tTYPE\tSTATE\tWORKSPACE\tPANE\tQUEUE")
+		rows := make([][]string, 0, len(agents))
 		for _, a := range agents {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\n",
-				truncate(a.ID, 12), a.Type, a.State, truncate(a.WorkspaceID, 12), a.TmuxPane, a.QueueLength)
+			workspaceID := "-"
+			if a.WorkspaceID != "" {
+				workspaceID = shortID(a.WorkspaceID)
+			}
+			pane := a.TmuxPane
+			if pane == "" {
+				pane = "-"
+			}
+			rows = append(rows, []string{
+				shortID(a.ID),
+				string(a.Type),
+				formatAgentState(a.State),
+				workspaceID,
+				pane,
+				fmt.Sprintf("%d", a.QueueLength),
+			})
 		}
-		return w.Flush()
+		return writeTable(os.Stdout, []string{"ID", "TYPE", "STATE", "WORKSPACE", "PANE", "QUEUE"}, rows)
 	},
 }
 
@@ -295,10 +318,15 @@ var agentStatusCmd = &cobra.Command{
 		tmuxClient := tmux.NewLocalClient()
 		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
 
-		stateResult, err := agentService.GetAgentState(ctx, agentID)
+		resolved, err := findAgent(ctx, agentRepo, agentID)
+		if err != nil {
+			return err
+		}
+
+		stateResult, err := agentService.GetAgentState(ctx, resolved.ID)
 		if err != nil {
 			if errors.Is(err, agent.ErrServiceAgentNotFound) {
-				return fmt.Errorf("agent '%s' not found", agentID)
+				return fmt.Errorf("agent '%s' not found", resolved.ID)
 			}
 			return fmt.Errorf("failed to get agent status: %w", err)
 		}
@@ -310,7 +338,7 @@ var agentStatusCmd = &cobra.Command{
 		a := stateResult.Agent
 		fmt.Printf("Agent: %s\n", a.ID)
 		fmt.Printf("Type:  %s\n", a.Type)
-		fmt.Printf("State: %s\n", a.State)
+		fmt.Printf("State: %s\n", formatAgentState(a.State))
 		fmt.Printf("  Confidence: %s\n", a.StateInfo.Confidence)
 		fmt.Printf("  Reason:     %s\n", a.StateInfo.Reason)
 		if len(a.StateInfo.Evidence) > 0 {
@@ -381,21 +409,29 @@ var agentTerminateCmd = &cobra.Command{
 		tmuxClient := tmux.NewLocalClient()
 		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
 
-		if err := agentService.TerminateAgent(ctx, agentID); err != nil {
+		resolved, err := findAgent(ctx, agentRepo, agentID)
+		if err != nil {
+			return err
+		}
+
+		step := startProgress("Terminating agent")
+		if err := agentService.TerminateAgent(ctx, resolved.ID); err != nil {
+			step.Fail(err)
 			if errors.Is(err, agent.ErrServiceAgentNotFound) {
-				return fmt.Errorf("agent '%s' not found", agentID)
+				return fmt.Errorf("agent '%s' not found", resolved.ID)
 			}
 			return fmt.Errorf("failed to terminate agent: %w", err)
 		}
+		step.Done()
 
 		if IsJSONOutput() || IsJSONLOutput() {
 			return WriteOutput(os.Stdout, map[string]any{
 				"terminated": true,
-				"agent_id":   agentID,
+				"agent_id":   resolved.ID,
 			})
 		}
 
-		fmt.Printf("Agent '%s' terminated\n", agentID)
+		fmt.Printf("Agent '%s' terminated\n", resolved.ID)
 		return nil
 	},
 }
@@ -425,9 +461,14 @@ var agentInterruptCmd = &cobra.Command{
 		tmuxClient := tmux.NewLocalClient()
 		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
 
-		if err := agentService.InterruptAgent(ctx, agentID); err != nil {
+		resolved, err := findAgent(ctx, agentRepo, agentID)
+		if err != nil {
+			return err
+		}
+
+		if err := agentService.InterruptAgent(ctx, resolved.ID); err != nil {
 			if errors.Is(err, agent.ErrServiceAgentNotFound) {
-				return fmt.Errorf("agent '%s' not found", agentID)
+				return fmt.Errorf("agent '%s' not found", resolved.ID)
 			}
 			return fmt.Errorf("failed to interrupt agent: %w", err)
 		}
@@ -435,11 +476,11 @@ var agentInterruptCmd = &cobra.Command{
 		if IsJSONOutput() || IsJSONLOutput() {
 			return WriteOutput(os.Stdout, map[string]any{
 				"interrupted": true,
-				"agent_id":    agentID,
+				"agent_id":    resolved.ID,
 			})
 		}
 
-		fmt.Printf("Agent '%s' interrupted\n", agentID)
+		fmt.Printf("Agent '%s' interrupted\n", resolved.ID)
 		return nil
 	},
 }
@@ -474,9 +515,14 @@ var agentPauseCmd = &cobra.Command{
 		tmuxClient := tmux.NewLocalClient()
 		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
 
-		if err := agentService.PauseAgent(ctx, agentID, duration); err != nil {
+		resolved, err := findAgent(ctx, agentRepo, agentID)
+		if err != nil {
+			return err
+		}
+
+		if err := agentService.PauseAgent(ctx, resolved.ID, duration); err != nil {
 			if errors.Is(err, agent.ErrServiceAgentNotFound) {
-				return fmt.Errorf("agent '%s' not found", agentID)
+				return fmt.Errorf("agent '%s' not found", resolved.ID)
 			}
 			return fmt.Errorf("failed to pause agent: %w", err)
 		}
@@ -486,13 +532,13 @@ var agentPauseCmd = &cobra.Command{
 		if IsJSONOutput() || IsJSONLOutput() {
 			return WriteOutput(os.Stdout, map[string]any{
 				"paused":       true,
-				"agent_id":     agentID,
+				"agent_id":     resolved.ID,
 				"duration":     duration.String(),
 				"paused_until": pausedUntil.Format(time.RFC3339),
 			})
 		}
 
-		fmt.Printf("Agent '%s' paused until %s\n", agentID, pausedUntil.Format(time.RFC3339))
+		fmt.Printf("Agent '%s' paused until %s\n", resolved.ID, pausedUntil.Format(time.RFC3339))
 		return nil
 	},
 }
@@ -522,9 +568,14 @@ var agentResumeCmd = &cobra.Command{
 		tmuxClient := tmux.NewLocalClient()
 		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
 
-		if err := agentService.ResumeAgent(ctx, agentID); err != nil {
+		resolved, err := findAgent(ctx, agentRepo, agentID)
+		if err != nil {
+			return err
+		}
+
+		if err := agentService.ResumeAgent(ctx, resolved.ID); err != nil {
 			if errors.Is(err, agent.ErrServiceAgentNotFound) {
-				return fmt.Errorf("agent '%s' not found", agentID)
+				return fmt.Errorf("agent '%s' not found", resolved.ID)
 			}
 			return fmt.Errorf("failed to resume agent: %w", err)
 		}
@@ -532,29 +583,40 @@ var agentResumeCmd = &cobra.Command{
 		if IsJSONOutput() || IsJSONLOutput() {
 			return WriteOutput(os.Stdout, map[string]any{
 				"resumed":  true,
-				"agent_id": agentID,
+				"agent_id": resolved.ID,
 			})
 		}
 
-		fmt.Printf("Agent '%s' resumed\n", agentID)
+		fmt.Printf("Agent '%s' resumed\n", resolved.ID)
 		return nil
 	},
 }
 
 var agentSendCmd = &cobra.Command{
-	Use:   "send <agent-id> <message>",
+	Use:   "send <agent-id> [message]",
 	Short: "Send a message to an agent",
-	Long:  "Send a text message to an agent. By default, requires the agent to be idle.",
-	Args:  cobra.MinimumNArgs(2),
+	Long: `Send a text message to an agent. By default, requires the agent to be idle.
+
+Provide the message inline, or use --file, --stdin, or --editor to send multi-line input.`,
+	Example: `  # Send a one-line message
+  swarm agent send abc123 "Fix the lint errors"
+
+  # Send a multi-line message from a file
+  swarm agent send abc123 --file prompt.txt
+
+  # Send from stdin
+  cat prompt.txt | swarm agent send abc123 --stdin
+
+  # Compose in $EDITOR
+  swarm agent send abc123 --editor`,
+	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
 		agentID := args[0]
-		message := args[1]
-		if len(args) > 2 {
-			// Join remaining args as message
-			for _, arg := range args[2:] {
-				message += " " + arg
-			}
+
+		message, err := resolveSendMessage(args)
+		if err != nil {
+			return err
 		}
 
 		database, err := openDatabase()
@@ -577,9 +639,14 @@ var agentSendCmd = &cobra.Command{
 			SkipIdleCheck: agentSendSkipIdle,
 		}
 
-		if err := agentService.SendMessage(ctx, agentID, message, opts); err != nil {
+		resolved, err := findAgent(ctx, agentRepo, agentID)
+		if err != nil {
+			return err
+		}
+
+		if err := agentService.SendMessage(ctx, resolved.ID, message, opts); err != nil {
 			if errors.Is(err, agent.ErrServiceAgentNotFound) {
-				return fmt.Errorf("agent '%s' not found", agentID)
+				return fmt.Errorf("agent '%s' not found", resolved.ID)
 			}
 			if errors.Is(err, agent.ErrAgentNotIdle) {
 				return fmt.Errorf("agent is not idle (use --skip-idle-check to force)")
@@ -590,12 +657,12 @@ var agentSendCmd = &cobra.Command{
 		if IsJSONOutput() || IsJSONLOutput() {
 			return WriteOutput(os.Stdout, map[string]any{
 				"sent":     true,
-				"agent_id": agentID,
+				"agent_id": resolved.ID,
 				"message":  message,
 			})
 		}
 
-		fmt.Printf("Message sent to agent '%s'\n", agentID)
+		fmt.Printf("Message sent to agent '%s'\n", resolved.ID)
 		return nil
 	},
 }
@@ -625,10 +692,15 @@ var agentRestartCmd = &cobra.Command{
 		tmuxClient := tmux.NewLocalClient()
 		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
 
-		newAgent, err := agentService.RestartAgent(ctx, agentID)
+		resolved, err := findAgent(ctx, agentRepo, agentID)
+		if err != nil {
+			return err
+		}
+
+		newAgent, err := agentService.RestartAgent(ctx, resolved.ID)
 		if err != nil {
 			if errors.Is(err, agent.ErrServiceAgentNotFound) {
-				return fmt.Errorf("agent '%s' not found", agentID)
+				return fmt.Errorf("agent '%s' not found", resolved.ID)
 			}
 			return fmt.Errorf("failed to restart agent: %w", err)
 		}
@@ -636,13 +708,13 @@ var agentRestartCmd = &cobra.Command{
 		if IsJSONOutput() || IsJSONLOutput() {
 			return WriteOutput(os.Stdout, map[string]any{
 				"restarted":    true,
-				"old_agent_id": agentID,
+				"old_agent_id": resolved.ID,
 				"new_agent":    newAgent,
 			})
 		}
 
 		fmt.Printf("Agent restarted:\n")
-		fmt.Printf("  Old ID: %s\n", agentID)
+		fmt.Printf("  Old ID: %s\n", resolved.ID)
 		fmt.Printf("  New ID: %s\n", newAgent.ID)
 		fmt.Printf("  Pane:   %s\n", newAgent.TmuxPane)
 		fmt.Printf("  State:  %s\n", newAgent.State)
@@ -688,12 +760,9 @@ Special markers in the file:
 		queueService := queue.NewService(queueRepo)
 
 		// Verify agent exists
-		a, err := agentRepo.Get(ctx, agentID)
+		a, err := findAgent(ctx, agentRepo, agentID)
 		if err != nil {
-			if errors.Is(err, db.ErrAgentNotFound) {
-				return fmt.Errorf("agent '%s' not found", agentID)
-			}
-			return fmt.Errorf("failed to get agent: %w", err)
+			return err
 		}
 
 		// Collect messages
@@ -826,4 +895,116 @@ Special markers in the file:
 		}
 		return nil
 	},
+}
+
+func resolveSendMessage(args []string) (string, error) {
+	hasInline := len(args) > 1
+	sourceCount := 0
+	if hasInline {
+		sourceCount++
+	}
+	if agentSendFile != "" {
+		sourceCount++
+	}
+	if agentSendStdin {
+		sourceCount++
+	}
+	if agentSendEditor {
+		sourceCount++
+	}
+
+	if sourceCount == 0 {
+		return "", errors.New("message required (provide <message>, --file, --stdin, or --editor)")
+	}
+	if sourceCount > 1 {
+		return "", errors.New("choose only one message source: <message>, --file, --stdin, or --editor")
+	}
+
+	var message string
+	var err error
+
+	switch {
+	case agentSendFile != "":
+		message, err = readMessageFromFile(agentSendFile)
+	case agentSendStdin:
+		message, err = readMessageFromStdin()
+	case agentSendEditor:
+		message, err = readMessageFromEditor()
+	default:
+		message = strings.Join(args[1:], " ")
+	}
+
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(message) == "" {
+		return "", errors.New("message is empty (provide content via <message>, --file, --stdin, or --editor)")
+	}
+
+	return message, nil
+}
+
+func readMessageFromFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read message file %q: %w", path, err)
+	}
+	if len(data) == 0 {
+		return "", fmt.Errorf("message file %q is empty (add content or use --editor/--stdin)", path)
+	}
+	return string(data), nil
+}
+
+func readMessageFromStdin() (string, error) {
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return "", fmt.Errorf("failed to read stdin: %w", err)
+	}
+	if len(data) == 0 {
+		return "", errors.New("stdin was empty (pipe a message or use --file/--editor)")
+	}
+	return string(data), nil
+}
+
+func readMessageFromEditor() (string, error) {
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = os.Getenv("VISUAL")
+	}
+	if editor == "" {
+		return "", errors.New("EDITOR is not set (set $EDITOR or use --file/--stdin)")
+	}
+
+	parts := strings.Fields(editor)
+	if len(parts) == 0 {
+		return "", errors.New("EDITOR is empty")
+	}
+
+	tmpFile, err := os.CreateTemp("", "swarm-agent-send-*.txt")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	if err := tmpFile.Close(); err != nil {
+		return "", fmt.Errorf("failed to close temp file: %w", err)
+	}
+	defer os.Remove(tmpPath)
+
+	editorCmd := exec.Command(parts[0], append(parts[1:], tmpPath)...)
+	editorCmd.Stdin = os.Stdin
+	editorCmd.Stdout = os.Stdout
+	editorCmd.Stderr = os.Stderr
+
+	if err := editorCmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to run editor %q: %w", parts[0], err)
+	}
+
+	data, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read editor output: %w", err)
+	}
+	if len(data) == 0 {
+		return "", errors.New("editor output was empty (save content before exiting)")
+	}
+	return string(data), nil
 }

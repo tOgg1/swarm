@@ -7,11 +7,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"text/tabwriter"
 
+	"github.com/opencode-ai/swarm/internal/agent"
 	"github.com/opencode-ai/swarm/internal/db"
 	"github.com/opencode-ai/swarm/internal/models"
 	"github.com/opencode-ai/swarm/internal/node"
+	"github.com/opencode-ai/swarm/internal/tmux"
 	"github.com/opencode-ai/swarm/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -36,6 +37,9 @@ var (
 	// ws remove flags
 	wsRemoveForce   bool
 	wsRemoveDestroy bool
+
+	// ws kill flags
+	wsKillForce bool
 )
 
 func init() {
@@ -46,6 +50,7 @@ func init() {
 	wsCmd.AddCommand(wsStatusCmd)
 	wsCmd.AddCommand(wsAttachCmd)
 	wsCmd.AddCommand(wsRemoveCmd)
+	wsCmd.AddCommand(wsKillCmd)
 	wsCmd.AddCommand(wsRefreshCmd)
 
 	// Create flags
@@ -70,6 +75,9 @@ func init() {
 	// Remove flags
 	wsRemoveCmd.Flags().BoolVarP(&wsRemoveForce, "force", "f", false, "force removal even with active agents")
 	wsRemoveCmd.Flags().BoolVar(&wsRemoveDestroy, "destroy", false, "also kill the tmux session")
+
+	// Kill flags
+	wsKillCmd.Flags().BoolVarP(&wsKillForce, "force", "f", false, "force kill even with active agents")
 }
 
 var wsCmd = &cobra.Command{
@@ -114,16 +122,9 @@ By default, a tmux session is created in the repository directory.`,
 		// Resolve node ID if name provided
 		nodeID := ""
 		if wsCreateNode != "" {
-			n, err := nodeService.GetNodeByName(ctx, wsCreateNode)
+			n, err := findNode(ctx, nodeService, wsCreateNode)
 			if err != nil {
-				if errors.Is(err, node.ErrNodeNotFound) {
-					n, err = nodeService.GetNode(ctx, wsCreateNode)
-					if err != nil {
-						return fmt.Errorf("node '%s' not found", wsCreateNode)
-					}
-				} else {
-					return fmt.Errorf("failed to get node: %w", err)
-				}
+				return err
 			}
 			nodeID = n.ID
 		}
@@ -136,8 +137,10 @@ By default, a tmux session is created in the repository directory.`,
 			CreateTmuxSession: !wsCreateNoTmux,
 		}
 
+		step := startProgress("Creating workspace")
 		ws, err := wsService.CreateWorkspace(ctx, input)
 		if err != nil {
+			step.Fail(err)
 			if errors.Is(err, workspace.ErrWorkspaceAlreadyExists) {
 				return fmt.Errorf("workspace already exists for this path")
 			}
@@ -146,6 +149,7 @@ By default, a tmux session is created in the repository directory.`,
 			}
 			return fmt.Errorf("failed to create workspace: %w", err)
 		}
+		step.Done()
 
 		if IsJSONOutput() || IsJSONLOutput() {
 			return WriteOutput(os.Stdout, ws)
@@ -191,16 +195,9 @@ This allows Swarm to manage agents in sessions created outside of Swarm.`,
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		// Resolve node
-		n, err := nodeService.GetNodeByName(ctx, wsImportNode)
+		n, err := findNode(ctx, nodeService, wsImportNode)
 		if err != nil {
-			if errors.Is(err, node.ErrNodeNotFound) {
-				n, err = nodeService.GetNode(ctx, wsImportNode)
-				if err != nil {
-					return fmt.Errorf("node '%s' not found", wsImportNode)
-				}
-			} else {
-				return fmt.Errorf("failed to get node: %w", err)
-			}
+			return err
 		}
 
 		input := workspace.ImportWorkspaceInput{
@@ -209,13 +206,16 @@ This allows Swarm to manage agents in sessions created outside of Swarm.`,
 			Name:        wsImportName,
 		}
 
+		step := startProgress("Importing workspace")
 		ws, err := wsService.ImportWorkspace(ctx, input)
 		if err != nil {
+			step.Fail(err)
 			if errors.Is(err, workspace.ErrWorkspaceAlreadyExists) {
 				return fmt.Errorf("workspace already exists for this session")
 			}
 			return fmt.Errorf("failed to import workspace: %w", err)
 		}
+		step.Done()
 
 		if IsJSONOutput() || IsJSONLOutput() {
 			return WriteOutput(os.Stdout, ws)
@@ -257,16 +257,9 @@ var wsListCmd = &cobra.Command{
 
 		if wsListNode != "" {
 			// Resolve node
-			n, err := nodeService.GetNodeByName(ctx, wsListNode)
+			n, err := findNode(ctx, nodeService, wsListNode)
 			if err != nil {
-				if errors.Is(err, node.ErrNodeNotFound) {
-					n, err = nodeService.GetNode(ctx, wsListNode)
-					if err != nil {
-						return fmt.Errorf("node '%s' not found", wsListNode)
-					}
-				} else {
-					return fmt.Errorf("failed to get node: %w", err)
-				}
+				return err
 			}
 			opts.NodeID = n.ID
 		}
@@ -290,13 +283,34 @@ var wsListCmd = &cobra.Command{
 			return nil
 		}
 
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID\tNAME\tSTATUS\tPATH\tSESSION\tAGENTS")
-		for _, ws := range workspaces {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\n",
-				ws.ID, ws.Name, ws.Status, truncatePath(ws.RepoPath, 40), ws.TmuxSession, ws.AgentCount)
+		nodeLabels := make(map[string]string)
+		if nodes, err := nodeService.ListNodes(ctx, nil); err == nil {
+			for _, n := range nodes {
+				if n != nil && n.Name != "" {
+					nodeLabels[n.ID] = n.Name
+				}
+			}
 		}
-		return w.Flush()
+
+		rows := make([][]string, 0, len(workspaces))
+		for _, ws := range workspaces {
+			nodeLabel := nodeLabels[ws.NodeID]
+			if nodeLabel == "" {
+				nodeLabel = shortID(ws.NodeID)
+			}
+
+			rows = append(rows, []string{
+				ws.Name,
+				shortID(ws.ID),
+				nodeLabel,
+				truncatePath(ws.RepoPath, 40),
+				formatWorkspaceStatus(ws.Status),
+				fmt.Sprintf("%d", ws.AgentCount),
+				ws.TmuxSession,
+			})
+		}
+
+		return writeTable(os.Stdout, []string{"NAME", "ID", "NODE", "PATH", "STATUS", "AGENTS", "SESSION"}, rows)
 	},
 }
 
@@ -340,7 +354,7 @@ var wsStatusCmd = &cobra.Command{
 		fmt.Printf("Workspace: %s (%s)\n", status.Workspace.Name, status.Workspace.ID)
 		fmt.Printf("Path:      %s\n", status.Workspace.RepoPath)
 		fmt.Printf("Session:   %s\n", status.Workspace.TmuxSession)
-		fmt.Printf("Status:    %s\n", status.Workspace.Status)
+		fmt.Printf("Status:    %s\n", formatWorkspaceStatus(status.Workspace.Status))
 		fmt.Println()
 
 		fmt.Printf("Node Online:   %v\n", status.NodeOnline)
@@ -403,10 +417,13 @@ var wsAttachCmd = &cobra.Command{
 			return err
 		}
 
+		step := startProgress("Preparing tmux attach")
 		attachCmd, err := wsService.AttachWorkspace(ctx, ws.ID)
 		if err != nil {
+			step.Fail(err)
 			return fmt.Errorf("failed to get attach command: %w", err)
 		}
+		step.Done()
 
 		if IsJSONOutput() || IsJSONLOutput() {
 			return WriteOutput(os.Stdout, map[string]string{
@@ -490,6 +507,71 @@ Use --destroy to also kill the tmux session.`,
 	},
 }
 
+var wsKillCmd = &cobra.Command{
+	Use:     "kill <id-or-name>",
+	Aliases: []string{"destroy"},
+	Short:   "Destroy a workspace",
+	Long: `Destroy a workspace by terminating agents, killing the tmux session,
+and removing the Swarm record.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := context.Background()
+		idOrName := args[0]
+
+		database, err := openDatabase()
+		if err != nil {
+			return err
+		}
+		defer database.Close()
+
+		nodeRepo := db.NewNodeRepository(database)
+		nodeService := node.NewService(nodeRepo)
+		wsRepo := db.NewWorkspaceRepository(database)
+		agentRepo := db.NewAgentRepository(database)
+		queueRepo := db.NewQueueRepository(database)
+		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
+
+		tmuxClient := tmux.NewLocalClient()
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, tmuxClient)
+
+		ws, err := findWorkspace(ctx, wsRepo, idOrName)
+		if err != nil {
+			return err
+		}
+
+		agents, err := agentRepo.ListByWorkspace(ctx, ws.ID)
+		if err != nil {
+			return fmt.Errorf("failed to list agents: %w", err)
+		}
+
+		if len(agents) > 0 && !wsKillForce {
+			return fmt.Errorf("workspace has %d agents; use --force to kill anyway", len(agents))
+		}
+
+		for _, agentRecord := range agents {
+			if err := agentService.TerminateAgent(ctx, agentRecord.ID); err != nil {
+				return fmt.Errorf("failed to terminate agent %s: %w", agentRecord.ID, err)
+			}
+		}
+
+		if err := wsService.DestroyWorkspace(ctx, ws.ID); err != nil {
+			return fmt.Errorf("failed to destroy workspace: %w", err)
+		}
+
+		if IsJSONOutput() || IsJSONLOutput() {
+			return WriteOutput(os.Stdout, map[string]any{
+				"destroyed":     true,
+				"workspace_id":  ws.ID,
+				"name":          ws.Name,
+				"agents_killed": len(agents),
+			})
+		}
+
+		fmt.Printf("Workspace '%s' destroyed (killed %d agents)\n", ws.Name, len(agents))
+		return nil
+	},
+}
+
 var wsRefreshCmd = &cobra.Command{
 	Use:   "refresh [id-or-name]",
 	Short: "Refresh workspace git info",
@@ -555,29 +637,6 @@ var wsRefreshCmd = &cobra.Command{
 
 		return nil
 	},
-}
-
-// findWorkspace finds a workspace by ID or name.
-func findWorkspace(ctx context.Context, repo *db.WorkspaceRepository, idOrName string) (*models.Workspace, error) {
-	// Try by name first
-	ws, err := repo.GetByName(ctx, idOrName)
-	if err == nil {
-		return ws, nil
-	}
-	if !errors.Is(err, db.ErrWorkspaceNotFound) {
-		return nil, fmt.Errorf("failed to get workspace: %w", err)
-	}
-
-	// Try by ID
-	ws, err = repo.Get(ctx, idOrName)
-	if err != nil {
-		if errors.Is(err, db.ErrWorkspaceNotFound) {
-			return nil, fmt.Errorf("workspace '%s' not found", idOrName)
-		}
-		return nil, fmt.Errorf("failed to get workspace: %w", err)
-	}
-
-	return ws, nil
 }
 
 // truncatePath truncates a path for display.

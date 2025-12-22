@@ -18,6 +18,8 @@ var (
 	jsonlOutput bool
 	watchMode   bool
 	verbose     bool
+	noColor     bool
+	noProgress  bool
 	logLevel    string
 	logFormat   string
 
@@ -53,11 +55,19 @@ Run 'swarm' without arguments to launch the TUI dashboard.`,
 // Execute runs the root command
 func Execute(version, commit, date string) error {
 	rootCmd.Version = formatVersion(version, commit, date)
-	return rootCmd.Execute()
+	rootCmd.SilenceErrors = true
+	rootCmd.SilenceUsage = true
+	if err := rootCmd.Execute(); err != nil {
+		return handleCLIError(err)
+	}
+	return nil
 }
 
 func init() {
 	cobra.OnInitialize(initConfig)
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		return runPreflight(cmd)
+	}
 
 	// Global flags
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/swarm/config.yaml)")
@@ -65,6 +75,8 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&jsonlOutput, "jsonl", false, "output in JSON Lines format (for streaming)")
 	rootCmd.PersistentFlags().BoolVar(&watchMode, "watch", false, "watch for changes and stream updates")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose output")
+	rootCmd.PersistentFlags().BoolVar(&noColor, "no-color", false, "disable colored output")
+	rootCmd.PersistentFlags().BoolVar(&noProgress, "no-progress", false, "disable progress output")
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "", "override logging level (debug, info, warn, error)")
 	rootCmd.PersistentFlags().StringVar(&logFormat, "log-format", "", "override logging format (json, console)")
 }

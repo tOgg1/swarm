@@ -46,23 +46,20 @@ This creates `~/.local/share/swarm/swarm.db` by default.
 
 The TUI is currently a stub that prints a placeholder message.
 
-## First workspace (planned)
-
-These commands are part of the planned CLI surface and will be wired up as
-core services land:
+## First workspace
 
 ```bash
-# Add a node (local or remote)
-./build/swarm node add --name local --ssh localhost
+# Add a local node
+./build/swarm node add --name local --local
 
 # Create a workspace
 ./build/swarm ws create --node local --path /path/to/repo
 
 # Spawn an agent
-./build/swarm agent spawn --ws <workspace-id> --type opencode --count 1
+./build/swarm agent spawn --workspace <workspace-id> --type opencode --count 1
 ```
 
-## Basic commands (planned)
+## Basic commands
 
 ```bash
 ./build/swarm node list
@@ -72,7 +69,4 @@ core services land:
 
 ## Troubleshooting
 
-- If `swarm migrate up` fails, check `~/.config/swarm/config.yaml` and ensure the
-  `global.data_dir` path is writable.
-- If `tmux` is not installed, workspace and agent commands will fail once
-  enabled.
+See `docs/troubleshooting.md` for common fixes and copy-paste commands.

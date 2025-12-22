@@ -361,7 +361,7 @@ func (s *Service) GetWorkspaceStatus(ctx context.Context, id string) (*Workspace
 		if err != nil {
 			s.logger.Warn().Err(err).Msg("failed to list agents for alerts")
 		} else {
-			result.Alerts = append(result.Alerts, buildAlerts(agents)...)
+			result.Alerts = append(result.Alerts, BuildAlerts(agents)...)
 
 			for _, agent := range agents {
 				switch agent.State {
@@ -557,43 +557,4 @@ func (s *Service) isTmuxSessionActive(ctx context.Context, nodeObj *models.Node,
 	}
 
 	return exists
-}
-
-func buildAlerts(agents []*models.Agent) []models.Alert {
-	alerts := make([]models.Alert, 0)
-
-	for _, agent := range agents {
-		switch agent.State {
-		case models.AgentStateAwaitingApproval:
-			alerts = append(alerts, models.Alert{
-				Type:     models.AlertTypeApprovalNeeded,
-				Severity: models.AlertSeverityWarning,
-				Message:  "Approval needed",
-				AgentID:  agent.ID,
-			})
-		case models.AgentStateRateLimited:
-			alerts = append(alerts, models.Alert{
-				Type:     models.AlertTypeRateLimit,
-				Severity: models.AlertSeverityWarning,
-				Message:  "Agent rate limited",
-				AgentID:  agent.ID,
-			})
-		case models.AgentStateError:
-			alerts = append(alerts, models.Alert{
-				Type:     models.AlertTypeError,
-				Severity: models.AlertSeverityError,
-				Message:  "Agent error",
-				AgentID:  agent.ID,
-			})
-		case models.AgentStatePaused:
-			alerts = append(alerts, models.Alert{
-				Type:     models.AlertTypeCooldown,
-				Severity: models.AlertSeverityInfo,
-				Message:  "Agent paused",
-				AgentID:  agent.ID,
-			})
-		}
-	}
-
-	return alerts
 }

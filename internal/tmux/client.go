@@ -196,10 +196,11 @@ func (c *Client) KillSession(ctx context.Context, session string) error {
 
 // Pane describes a tmux pane.
 type Pane struct {
-	ID         string // e.g., "%1"
-	Index      int    // pane index within window
-	CurrentDir string
-	Active     bool
+	ID          string // e.g., "%1"
+	WindowIndex int    // window index within session
+	Index       int    // pane index within window
+	CurrentDir  string
+	Active      bool
 }
 
 // ListPanes returns all panes in a session.
@@ -208,7 +209,7 @@ func (c *Client) ListPanes(ctx context.Context, session string) ([]Pane, error) 
 		return nil, fmt.Errorf("session name is required")
 	}
 
-	cmd := fmt.Sprintf("tmux list-panes -t %s -F '#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_active}'", escapeSessionName(session))
+	cmd := fmt.Sprintf("tmux list-panes -t %s -F '#{pane_id}|#{window_index}|#{pane_index}|#{pane_current_path}|#{pane_active}'", escapeSessionName(session))
 	stdout, stderr, err := c.exec.Exec(ctx, cmd)
 	if err != nil {
 		if isNoServerRunning(stderr) {
@@ -224,17 +225,19 @@ func (c *Client) ListPanes(ctx context.Context, session string) ([]Pane, error) 
 
 	var panes []Pane
 	for _, line := range strings.Split(output, "\n") {
-		parts := strings.SplitN(line, "|", 4)
-		if len(parts) != 4 {
+		parts := strings.SplitN(line, "|", 5)
+		if len(parts) != 5 {
 			return nil, fmt.Errorf("unexpected tmux output line: %q", line)
 		}
 
-		index, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+		windowIndex, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+		index, _ := strconv.Atoi(strings.TrimSpace(parts[2]))
 		panes = append(panes, Pane{
-			ID:         strings.TrimSpace(parts[0]),
-			Index:      index,
-			CurrentDir: strings.TrimSpace(parts[2]),
-			Active:     strings.TrimSpace(parts[3]) == "1",
+			ID:          strings.TrimSpace(parts[0]),
+			WindowIndex: windowIndex,
+			Index:       index,
+			CurrentDir:  strings.TrimSpace(parts[3]),
+			Active:      strings.TrimSpace(parts[4]) == "1",
 		})
 	}
 

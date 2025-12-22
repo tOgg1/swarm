@@ -177,7 +177,7 @@ func (r *AgentRepository) ListWithQueueLength(ctx context.Context) ([]*models.Ag
 		FROM agents a
 		LEFT JOIN queue_items q
 			ON q.agent_id = a.id
-			AND q.status IN ('pending', 'dispatched')
+			AND q.status = 'pending'
 		GROUP BY a.id
 		ORDER BY a.created_at
 	`)

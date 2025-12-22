@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/opencode-ai/swarm/internal/account"
 	"github.com/opencode-ai/swarm/internal/agent"
 	"github.com/opencode-ai/swarm/internal/logging"
 	"github.com/opencode-ai/swarm/internal/models"
@@ -24,6 +25,7 @@ var (
 	ErrAgentNotFound           = errors.New("agent not found")
 	ErrAgentPaused             = errors.New("agent is paused")
 	ErrAgentNotEligible        = errors.New("agent is not eligible for dispatch")
+	ErrAccountOnCooldown       = errors.New("account is on cooldown")
 	ErrQueueEmpty              = errors.New("queue is empty")
 	ErrDispatchFailed          = errors.New("dispatch failed")
 )
@@ -115,11 +117,12 @@ type SchedulerStats struct {
 
 // Scheduler manages message dispatch to agents.
 type Scheduler struct {
-	config       Config
-	agentService *agent.Service
-	queueService queue.QueueService
-	stateEngine  *state.Engine
-	logger       zerolog.Logger
+	config         Config
+	agentService   *agent.Service
+	queueService   queue.QueueService
+	stateEngine    *state.Engine
+	accountService *account.Service
+	logger         zerolog.Logger
 
 	// Runtime state
 	mu           sync.RWMutex
@@ -139,7 +142,7 @@ type Scheduler struct {
 }
 
 // New creates a new Scheduler.
-func New(config Config, agentService *agent.Service, queueService queue.QueueService, stateEngine *state.Engine) *Scheduler {
+func New(config Config, agentService *agent.Service, queueService queue.QueueService, stateEngine *state.Engine, accountService *account.Service) *Scheduler {
 	if config.TickInterval <= 0 {
 		config.TickInterval = DefaultConfig().TickInterval
 	}
@@ -151,15 +154,16 @@ func New(config Config, agentService *agent.Service, queueService queue.QueueSer
 	}
 
 	return &Scheduler{
-		config:       config,
-		agentService: agentService,
-		queueService: queueService,
-		stateEngine:  stateEngine,
-		logger:       logging.Component("scheduler"),
-		dispatchSem:  make(chan struct{}, config.MaxConcurrentDispatches),
-		scheduleNow:  make(chan string, 100),
-		pausedAgents: make(map[string]struct{}),
-		dispatchCh:   make(chan DispatchEvent, 100),
+		config:         config,
+		agentService:   agentService,
+		queueService:   queueService,
+		stateEngine:    stateEngine,
+		accountService: accountService,
+		logger:         logging.Component("scheduler"),
+		dispatchSem:    make(chan struct{}, config.MaxConcurrentDispatches),
+		scheduleNow:    make(chan string, 100),
+		pausedAgents:   make(map[string]struct{}),
+		dispatchCh:     make(chan DispatchEvent, 100),
 	}
 }
 

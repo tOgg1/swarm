@@ -180,6 +180,7 @@ func TestAgentRepository_ListWithQueueLength(t *testing.T) {
 
 	insertQueueItem(t, db, agent.ID, models.QueueItemStatusPending, 1)
 	insertQueueItem(t, db, agent.ID, models.QueueItemStatusCompleted, 2)
+	insertQueueItem(t, db, agent.ID, models.QueueItemStatusDispatched, 3)
 
 	agents, err := repo.ListWithQueueLength(context.Background())
 	if err != nil {

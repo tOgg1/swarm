@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -318,7 +319,7 @@ func (s *Service) cleanupSpawnFailure(ctx context.Context, agent *models.Agent) 
 }
 
 func (s *Service) paneExists(ctx context.Context, target string) (bool, error) {
-	session, paneID, ok := splitPaneTarget(target)
+	session, paneSpec, ok := splitPaneTarget(target)
 	if !ok {
 		return false, fmt.Errorf("invalid pane target: %q", target)
 	}
@@ -336,8 +337,40 @@ func (s *Service) paneExists(ctx context.Context, target string) (bool, error) {
 		return false, err
 	}
 
+	paneSpec = strings.TrimSpace(paneSpec)
+	if paneSpec == "" {
+		return false, fmt.Errorf("invalid pane target: %q", target)
+	}
+
+	if strings.HasPrefix(paneSpec, "%") {
+		for _, pane := range panes {
+			if pane.ID == paneSpec {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+
+	if windowIndex, paneIndex, ok := parseWindowPaneSpec(paneSpec); ok {
+		for _, pane := range panes {
+			if pane.WindowIndex == windowIndex && pane.Index == paneIndex {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+
+	if paneIndex, err := strconv.Atoi(paneSpec); err == nil {
+		for _, pane := range panes {
+			if pane.Index == paneIndex {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+
 	for _, pane := range panes {
-		if pane.ID == paneID {
+		if pane.ID == paneSpec {
 			return true, nil
 		}
 	}
@@ -358,6 +391,24 @@ func splitPaneTarget(target string) (session, paneID string, ok bool) {
 	}
 
 	return session, paneID, true
+}
+
+func parseWindowPaneSpec(spec string) (int, int, bool) {
+	parts := strings.SplitN(spec, ".", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+
+	windowIndex, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return 0, 0, false
+	}
+	paneIndex, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return 0, 0, false
+	}
+
+	return windowIndex, paneIndex, true
 }
 
 func lastNonEmptyLine(output string) string {
@@ -464,7 +515,7 @@ func (s *Service) GetAgentState(ctx context.Context, id string) (*AgentStateResu
 
 	// Check if pane is active
 	if agent.TmuxPane != "" {
-		exists, err := s.tmuxClient.HasSession(ctx, agent.TmuxPane)
+		exists, err := s.paneExists(ctx, agent.TmuxPane)
 		if err == nil {
 			result.PaneActive = exists
 		}
@@ -812,8 +863,12 @@ func (s *Service) SendMessage(ctx context.Context, id, message string, opts *Sen
 		}
 
 		// Check if pane is still active
-		paneActive, err := s.tmuxClient.HasSession(ctx, agent.TmuxPane)
-		if err != nil || !paneActive {
+		paneActive, err := s.paneExists(ctx, agent.TmuxPane)
+		if err != nil {
+			lastErr = err
+			break
+		}
+		if !paneActive {
 			lastErr = fmt.Errorf("pane is dead or inaccessible")
 			break // Don't retry if pane is dead
 		}
