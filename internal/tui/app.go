@@ -60,35 +60,37 @@ func RunWithConfig(cfg Config) error {
 }
 
 type model struct {
-	width         int
-	height        int
-	styles        styles.Styles
-	view          viewID
-	selectedView  viewID
-	showHelp      bool
-	showInspector bool
-	selectedAgent string
-	pausedAll     bool
-	statusMsg     string
-	statusWarn    bool
-	searchOpen    bool
-	searchQuery   string
-	searchTarget  viewID
-	agentFilter   string
-	paletteOpen   bool
-	paletteQuery  string
-	paletteIndex  int
-	lastUpdated   time.Time
-	stale         bool
-	stateEngine   *state.Engine
-	agentStates   map[string]models.AgentState
-	agentInfo     map[string]models.StateInfo
-	agentLast     map[string]time.Time
-	stateChanges  []StateChangeMsg
-	nodes         []nodeSummary
-	nodesPreview  bool
-	workspaceGrid *components.WorkspaceGrid
-	selectedWsID  string // Selected workspace ID for drill-down
+	width            int
+	height           int
+	styles           styles.Styles
+	view             viewID
+	selectedView     viewID
+	showHelp         bool
+	showInspector    bool
+	selectedAgent    string
+	pausedAll        bool
+	statusMsg        string
+	statusWarn       bool
+	searchOpen       bool
+	searchQuery      string
+	searchTarget     viewID
+	agentFilter      string
+	paletteOpen      bool
+	paletteQuery     string
+	paletteIndex     int
+	lastUpdated      time.Time
+	stale            bool
+	stateEngine      *state.Engine
+	agentStates      map[string]models.AgentState
+	agentInfo        map[string]models.StateInfo
+	agentLast        map[string]time.Time
+	stateChanges     []StateChangeMsg
+	nodes            []nodeSummary
+	nodesPreview     bool
+	workspaceGrid    *components.WorkspaceGrid
+	selectedWsID     string // Selected workspace ID for drill-down
+	transcriptViewer *components.TranscriptViewer
+	showTranscript   bool
 }
 
 type nodeSummary struct {
@@ -109,18 +111,21 @@ func initialModel() model {
 	now := time.Now()
 	grid := components.NewWorkspaceGrid()
 	grid.SetWorkspaces(sampleWorkspaces())
+	tv := components.NewTranscriptViewer()
+	tv.SetContent(sampleTranscript())
 	return model{
-		styles:        styles.DefaultStyles(),
-		view:          viewDashboard,
-		selectedView:  viewDashboard,
-		lastUpdated:   now,
-		agentStates:   make(map[string]models.AgentState),
-		agentInfo:     make(map[string]models.StateInfo),
-		agentLast:     make(map[string]time.Time),
-		stateChanges:  make([]StateChangeMsg, 0),
-		nodes:         sampleNodes(),
-		nodesPreview:  true,
-		workspaceGrid: grid,
+		styles:           styles.DefaultStyles(),
+		view:             viewDashboard,
+		selectedView:     viewDashboard,
+		lastUpdated:      now,
+		agentStates:      make(map[string]models.AgentState),
+		agentInfo:        make(map[string]models.StateInfo),
+		agentLast:        make(map[string]time.Time),
+		stateChanges:     make([]StateChangeMsg, 0),
+		nodes:            sampleNodes(),
+		nodesPreview:     true,
+		workspaceGrid:    grid,
+		transcriptViewer: tv,
 	}
 }
 
@@ -140,6 +145,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "tab" || msg.String() == "i" {
 			m.showInspector = !m.showInspector
 			return m, nil
+		}
+		if msg.String() == "t" && m.view == viewAgent {
+			m.showTranscript = !m.showTranscript
+			return m, nil
+		}
+		// Transcript navigation when visible
+		if m.showTranscript && m.transcriptViewer != nil && m.view == viewAgent {
+			switch msg.String() {
+			case "up", "k":
+				m.transcriptViewer.ScrollUp(1)
+				return m, nil
+			case "down", "j":
+				m.transcriptViewer.ScrollDown(1)
+				return m, nil
+			case "ctrl+u":
+				m.transcriptViewer.ScrollUp(10)
+				return m, nil
+			case "ctrl+d":
+				m.transcriptViewer.ScrollDown(10)
+				return m, nil
+			case "g":
+				m.transcriptViewer.ScrollToTop()
+				return m, nil
+			case "G":
+				m.transcriptViewer.ScrollToBottom()
+				return m, nil
+			case "n":
+				m.transcriptViewer.NextSearchHit()
+				return m, nil
+			case "N":
+				m.transcriptViewer.PrevSearchHit()
+				return m, nil
+			}
 		}
 		// Handle grid navigation in workspace view
 		if m.view == viewWorkspace && m.workspaceGrid != nil {
@@ -359,12 +397,25 @@ func (m *model) viewLines() []string {
 		}
 		return m.renderWithInspector(lines, "Workspace inspector", m.workspaceInspectorLines())
 	case viewAgent:
+		transcriptHint := "t: transcript"
+		if m.showTranscript {
+			transcriptHint = "t: hide transcript | jk/↑↓: scroll | g/G: top/bottom | n/N: search"
+		}
 		lines := []string{
 			m.styles.Accent.Render("Agent view"),
-			m.styles.Muted.Render("Confidence shows how certain state detection is."),
+			m.styles.Muted.Render(fmt.Sprintf("Confidence shows how certain state detection is. | %s", transcriptHint)),
 		}
 		if line := m.searchLine(viewAgent); line != "" {
 			lines = append(lines, line)
+		}
+		if m.showTranscript && m.transcriptViewer != nil {
+			// Show transcript view instead of agent cards
+			lines = append(lines, "")
+			_, inspectorWidth, _, _ := m.inspectorLayout()
+			m.transcriptViewer.Width = m.width - inspectorWidth - 4
+			m.transcriptViewer.Height = m.height - 10
+			lines = append(lines, m.transcriptViewer.Render(m.styles))
+			return m.renderWithInspector(lines, "Agent inspector", m.agentInspectorLines())
 		}
 		if len(m.agentStates) == 0 {
 			lines = append(lines, m.styles.Muted.Render("Sample data (no agents tracked yet)."))
@@ -426,6 +477,18 @@ func (m model) inspectorLayout() (mainWidth, inspectorWidth, gap int, vertical b
 	return mainWidth, inspectorWidth, gap, false
 }
 
+func (m model) inspectorContentWidth() int {
+	_, inspectorWidth, _, _ := m.inspectorLayout()
+	if inspectorWidth <= 0 {
+		inspectorWidth = 40
+	}
+	contentWidth := inspectorWidth - 4
+	if contentWidth < 20 {
+		contentWidth = 20
+	}
+	return contentWidth
+}
+
 func (m model) workspaceInspectorLines() []string {
 	if m.workspaceGrid == nil {
 		return []string{m.styles.Muted.Render("No workspace data loaded.")}
@@ -479,7 +542,13 @@ func (m model) agentInspectorLines() []string {
 		return []string{m.styles.Muted.Render("No agents available.")}
 	}
 
-	card := mostRecentAgentCard(cards)
+	var card *components.AgentCard
+	if strings.TrimSpace(m.selectedAgent) != "" {
+		card = findAgentCardByName(cards, m.selectedAgent)
+	}
+	if card == nil {
+		card = mostRecentAgentCard(cards)
+	}
 	if card == nil {
 		return []string{m.styles.Muted.Render("No agent selected.")}
 	}
@@ -495,7 +564,10 @@ func (m model) agentInspectorLines() []string {
 
 	reason := strings.TrimSpace(card.Reason)
 	if reason != "" {
-		lines = append(lines, m.styles.Muted.Render(fmt.Sprintf("Reason: %s", truncateText(reason, 60))))
+		lines = append(lines, m.styles.Muted.Render("Reason:"))
+		for _, line := range wrapText(reason, m.inspectorContentWidth()) {
+			lines = append(lines, m.styles.Muted.Render("  "+line))
+		}
 	}
 
 	queue := "--"
@@ -506,6 +578,19 @@ func (m model) agentInspectorLines() []string {
 	lines = append(lines, m.styles.Muted.Render(fmt.Sprintf("Last: %s", formatActivityTime(card.LastActivity))))
 
 	return lines
+}
+
+func findAgentCardByName(cards []components.AgentCard, name string) *components.AgentCard {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	for i := range cards {
+		if strings.EqualFold(cards[i].Name, name) {
+			return &cards[i]
+		}
+	}
+	return nil
 }
 
 func mostRecentAgentCard(cards []components.AgentCard) *components.AgentCard {
@@ -559,6 +644,69 @@ func truncateText(value string, maxLen int) string {
 		return value
 	}
 	return value[:maxLen-3] + "..."
+}
+
+func wrapText(value string, maxWidth int) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return []string{}
+	}
+	if maxWidth < 10 {
+		maxWidth = 10
+	}
+
+	words := strings.Fields(value)
+	lines := make([]string, 0, len(words))
+	current := ""
+
+	for _, word := range words {
+		wordLen := len([]rune(word))
+		if wordLen > maxWidth {
+			if current != "" {
+				lines = append(lines, current)
+				current = ""
+			}
+			parts := splitLongWord(word, maxWidth)
+			if len(parts) > 0 {
+				lines = append(lines, parts[:len(parts)-1]...)
+				current = parts[len(parts)-1]
+			}
+			continue
+		}
+
+		currentLen := len([]rune(current))
+		if current == "" {
+			current = word
+			continue
+		}
+		if currentLen+1+wordLen <= maxWidth {
+			current += " " + word
+		} else {
+			lines = append(lines, current)
+			current = word
+		}
+	}
+
+	if current != "" {
+		lines = append(lines, current)
+	}
+	return lines
+}
+
+func splitLongWord(word string, width int) []string {
+	if width < 1 {
+		return []string{word}
+	}
+	runes := []rune(word)
+	parts := make([]string, 0, (len(runes)+width-1)/width)
+	for i := 0; i < len(runes); i += width {
+		end := i + width
+		if end > len(runes) {
+			end = len(runes)
+		}
+		parts = append(parts, string(runes[i:end]))
+	}
+	return parts
 }
 
 func (m model) dashboardView() string {
@@ -815,108 +963,6 @@ func (m model) helpLines() []string {
 		m.styles.Muted.Render("i/tab: toggle inspector"),
 		m.styles.Muted.Render("g: cycle views"),
 		m.styles.Muted.Render("q: quit"),
-	}
-}
-
-func (m *model) openSearch(target viewID) {
-	m.searchOpen = true
-	m.searchTarget = target
-	m.searchQuery = ""
-	m.applySearchFilter()
-}
-
-func (m *model) closeSearch() {
-	if m.searchTarget == viewWorkspace && m.workspaceGrid != nil {
-		selectedID := ""
-		if ws := m.workspaceGrid.SelectedWorkspace(); ws != nil {
-			selectedID = ws.ID
-		}
-		m.workspaceGrid.SetFilter("")
-		if selectedID != "" {
-			m.workspaceGrid.SelectByID(selectedID)
-		}
-	}
-	if m.searchTarget == viewAgent {
-		m.agentFilter = ""
-	}
-	m.searchOpen = false
-	m.searchQuery = ""
-	m.searchTarget = viewDashboard
-}
-
-func (m model) searchLine(target viewID) string {
-	if !m.searchOpen || m.searchTarget != target {
-		return ""
-	}
-	label := "Search"
-	if target == viewWorkspace {
-		label = "Search workspaces"
-	}
-	if target == viewAgent {
-		label = "Search agents"
-	}
-	query := m.searchQuery
-	if query == "" {
-		query = "..."
-	}
-	return m.styles.Muted.Render(fmt.Sprintf("%s: %s", label, query))
-}
-
-func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyRunes:
-		m.searchQuery += string(msg.Runes)
-	case tea.KeyBackspace, tea.KeyDelete:
-		m.searchQuery = trimLastRune(m.searchQuery)
-	}
-
-	switch msg.String() {
-	case "esc":
-		m.closeSearch()
-		return m, nil
-	case "enter":
-		m.applySearchSelection()
-		m.closeSearch()
-		return m, nil
-	}
-
-	m.applySearchFilter()
-	return m, nil
-}
-
-func (m *model) applySearchFilter() {
-	switch m.searchTarget {
-	case viewWorkspace:
-		if m.workspaceGrid != nil {
-			m.workspaceGrid.SetFilter(m.searchQuery)
-		}
-	case viewAgent:
-		m.agentFilter = m.searchQuery
-	}
-}
-
-func (m *model) applySearchSelection() {
-	if strings.TrimSpace(m.searchQuery) == "" {
-		return
-	}
-	switch m.searchTarget {
-	case viewWorkspace:
-		if m.workspaceGrid == nil {
-			return
-		}
-		ws := m.workspaceGrid.SelectedWorkspace()
-		if ws == nil {
-			return
-		}
-		m.selectedWsID = ws.ID
-		m.setStatus(fmt.Sprintf("Jumped to workspace %s", workspaceDisplayName(ws)), false)
-	case viewAgent:
-		cards := m.agentCards()
-		if len(cards) == 0 {
-			return
-		}
-		m.selectedAgent = cards[0].Name
-		m.setStatus(fmt.Sprintf("Jumped to agent %s", cards[0].Name), false)
 	}
 }
 
@@ -1177,6 +1223,22 @@ func shortID(value string) string {
 	return value[:8]
 }
 
+func workspaceDisplayName(ws *models.Workspace) string {
+	if ws == nil {
+		return "--"
+	}
+	if strings.TrimSpace(ws.Name) != "" {
+		return ws.Name
+	}
+	if strings.TrimSpace(ws.RepoPath) != "" {
+		return filepath.Base(ws.RepoPath)
+	}
+	if strings.TrimSpace(ws.ID) != "" {
+		return ws.ID
+	}
+	return "workspace"
+}
+
 func (m model) agentCards() []components.AgentCard {
 	if len(m.agentStates) == 0 {
 		return filterAgentCards(sampleAgentCards(), m.agentFilter)
@@ -1397,6 +1459,7 @@ func (m *model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.closeSearch()
 		return m, nil
 	case "enter":
+		m.applySearchSelection()
 		m.closeSearch()
 		return m, nil
 	case "ctrl+c":
@@ -1422,6 +1485,31 @@ func (m *model) applySearchQuery() {
 		}
 	case viewAgent:
 		m.agentFilter = m.searchQuery
+	}
+}
+
+func (m *model) applySearchSelection() {
+	if strings.TrimSpace(m.searchQuery) == "" {
+		return
+	}
+	switch m.searchTarget {
+	case viewWorkspace:
+		if m.workspaceGrid == nil {
+			return
+		}
+		ws := m.workspaceGrid.SelectedWorkspace()
+		if ws == nil {
+			return
+		}
+		m.selectedWsID = ws.ID
+		m.setStatus(fmt.Sprintf("Jumped to workspace %s", workspaceDisplayName(ws)), false)
+	case viewAgent:
+		cards := m.agentCards()
+		if len(cards) == 0 {
+			return
+		}
+		m.selectedAgent = cards[0].Name
+		m.setStatus(fmt.Sprintf("Jumped to agent %s", cards[0].Name), false)
 	}
 }
 
@@ -1509,4 +1597,65 @@ func fuzzyMatch(haystack, token string) bool {
 		}
 	}
 	return false
+}
+
+func sampleTranscript() string {
+	return `$ opencode
+[info] Starting OpenCode agent...
+[info] Model: gpt-5
+[info] Workspace: /home/user/projects/api-service
+
+> Analyzing codebase structure...
+
+Found 42 files in src/
+Found 15 files in tests/
+
+> Running initial assessment...
+
+The codebase appears to be a REST API service with:
+- Express.js server setup
+- PostgreSQL database connection
+- JWT authentication middleware
+- Basic CRUD endpoints for users and products
+
+> Ready for instructions.
+
+$ What tests are failing?
+
+> Checking test results...
+
+Running: npm test
+
+` + "```" + `
+FAIL src/users.test.js
+  ✓ should create a new user (45ms)
+  ✗ should validate email format (12ms)
+    Expected: validation error
+    Received: success
+
+PASS src/products.test.js
+  ✓ should list products (23ms)
+  ✓ should filter by category (31ms)
+` + "```" + `
+
+Error: 1 test failed in users.test.js
+The email validation test expects an error but receives success.
+
+> Investigating the issue...
+
+Looking at src/validators/email.js:
+The regex pattern is missing the TLD validation.
+
+> Suggested fix:
+
+` + "```javascript" + `
+// Current (incorrect)
+const emailRegex = /^[^@]+@[^@]+$/
+
+// Fixed
+const emailRegex = /^[^@]+@[^@]+\.[a-zA-Z]{2,}$/
+` + "```" + `
+
+? Apply this fix? [y/n]
+`
 }
