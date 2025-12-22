@@ -135,12 +135,15 @@ Notes:
 Manage provider accounts and cooldowns.
 
 ```bash
+swarm accounts add
 swarm accounts list
 swarm accounts cooldown list
 swarm accounts cooldown set <account> --until 30m
 swarm accounts cooldown clear <account>
 swarm accounts rotate <agent-id> --reason manual
 ```
+
+`swarm accounts add` prompts for provider, profile, and credential source. If you enter a secret directly, Swarm stores it in `~/.local/share/swarm/credentials` and records a `file:` reference.
 
 ### `swarm export`
 
@@ -170,12 +173,6 @@ These are defined in the product spec but not wired up yet.
 
 ```bash
 swarm agent approve <agent-id> [--all]
-```
-
-### `swarm accounts add`
-
-```bash
-swarm accounts add
 ```
 
 ### `swarm ws kill` / `swarm ws unmanage`

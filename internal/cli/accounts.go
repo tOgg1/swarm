@@ -2,11 +2,13 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -21,6 +23,7 @@ import (
 	"github.com/opencode-ai/swarm/internal/tmux"
 	"github.com/opencode-ai/swarm/internal/workspace"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var (
@@ -29,11 +32,13 @@ var (
 	accountsRotateReason  string
 
 	// accounts add flags
-	accountsAddProvider   string
-	accountsAddProfile    string
-	accountsAddCredential string
-	accountsAddEnvVar     string
-	accountsAddSkipTest   bool
+	accountsAddProvider      string
+	accountsAddProfile       string
+	accountsAddCredential    string
+	accountsAddCredentialRef string
+	accountsAddEnvVar        string
+	accountsAddSkipTest      bool
+	accountsAddForce         bool
 )
 
 func init() {
@@ -55,9 +60,11 @@ func init() {
 	// accounts add flags
 	accountsAddCmd.Flags().StringVar(&accountsAddProvider, "provider", "", "provider type (anthropic, openai, google, custom)")
 	accountsAddCmd.Flags().StringVar(&accountsAddProfile, "profile", "", "profile name for the account")
-	accountsAddCmd.Flags().StringVar(&accountsAddCredential, "credential", "", "API key or credential value")
+	accountsAddCmd.Flags().StringVar(&accountsAddCredentialRef, "credential-ref", "", "credential reference (env:VAR, $VAR, file:/path)")
+	accountsAddCmd.Flags().StringVar(&accountsAddCredential, "credential", "", "API key value (stored in a local file)")
 	accountsAddCmd.Flags().StringVar(&accountsAddEnvVar, "env-var", "", "environment variable containing the credential")
 	accountsAddCmd.Flags().BoolVar(&accountsAddSkipTest, "skip-test", false, "skip credential validation")
+	accountsAddCmd.Flags().BoolVar(&accountsAddForce, "force", false, "overwrite stored credential file if it exists")
 }
 
 var accountsCmd = &cobra.Command{
@@ -72,6 +79,7 @@ var accountsAddCmd = &cobra.Command{
 	Long:  "Add a new provider account with credentials. Prompts interactively or accepts flags.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
+		reader := bufio.NewReader(os.Stdin)
 
 		database, err := openDatabase()
 		if err != nil {
@@ -82,33 +90,42 @@ var accountsAddCmd = &cobra.Command{
 		repo := db.NewAccountRepository(database)
 
 		// Get provider
-		provider, err := getAccountProvider()
+		provider, err := getAccountProvider(reader)
 		if err != nil {
 			return err
 		}
 
 		// Get profile name
-		profile, err := getAccountProfile(provider)
+		profile, err := getAccountProfile(reader, provider)
 		if err != nil {
 			return err
 		}
 
 		// Check if profile already exists
-		existing, _ := findAccountByProfile(ctx, repo, profile)
+		existing, _ := findAccountByProfile(ctx, repo, provider, profile)
 		if existing != nil {
 			return fmt.Errorf("account profile %q already exists", profile)
 		}
 
 		// Get credential reference
-		credentialRef, err := getAccountCredential(provider)
+		credentialRef, err := getAccountCredential(reader, provider, profile, accountsAddForce)
 		if err != nil {
 			return err
 		}
 
 		// Validate credential
 		if !accountsAddSkipTest {
-			if err := validateCredential(ctx, provider, credentialRef); err != nil {
-				return fmt.Errorf("credential validation failed: %w", err)
+			if err := validateCredential(provider, credentialRef); err != nil {
+				if !IsInteractive() {
+					return fmt.Errorf("credential validation failed: %w", err)
+				}
+				confirm, promptErr := promptConfirm(reader, fmt.Sprintf("Credential validation failed (%v). Continue anyway? [y/N]: ", err))
+				if promptErr != nil {
+					return promptErr
+				}
+				if !confirm {
+					return fmt.Errorf("credential validation failed: %w", err)
+				}
 			}
 			fmt.Fprintln(os.Stderr, "Credential validated successfully.")
 		}
@@ -128,7 +145,7 @@ var accountsAddCmd = &cobra.Command{
 		}
 
 		// Reload to get ID
-		created, err := findAccountByProfile(ctx, repo, profile)
+		created, err := findAccountByProfile(ctx, repo, provider, profile)
 		if err != nil {
 			return fmt.Errorf("failed to load created account: %w", err)
 		}
@@ -143,7 +160,7 @@ var accountsAddCmd = &cobra.Command{
 }
 
 // getAccountProvider prompts for or returns the provider.
-func getAccountProvider() (models.Provider, error) {
+func getAccountProvider(reader *bufio.Reader) (models.Provider, error) {
 	if accountsAddProvider != "" {
 		return parseProvider(accountsAddProvider)
 	}
@@ -152,146 +169,160 @@ func getAccountProvider() (models.Provider, error) {
 		return "", fmt.Errorf("--provider is required in non-interactive mode")
 	}
 
-	providers := []string{"anthropic", "openai", "google", "custom"}
 	fmt.Fprintln(os.Stderr, "Select provider:")
-	for i, p := range providers {
-		fmt.Fprintf(os.Stderr, "  %d) %s\n", i+1, p)
+	fmt.Fprintln(os.Stderr, "  1) anthropic")
+	fmt.Fprintln(os.Stderr, "  2) openai")
+	fmt.Fprintln(os.Stderr, "  3) google")
+	fmt.Fprintln(os.Stderr, "  4) custom")
+	choice, err := promptLine(reader, "Provider [1-4]: ")
+	if err != nil {
+		return "", err
 	}
-	fmt.Fprintf(os.Stderr, "Provider [1-%d]: ", len(providers))
 
-	var choice int
-	if _, err := fmt.Scanf("%d", &choice); err != nil || choice < 1 || choice > len(providers) {
-		return "", fmt.Errorf("invalid selection")
+	switch strings.ToLower(choice) {
+	case "1", "anthropic":
+		return models.ProviderAnthropic, nil
+	case "2", "openai":
+		return models.ProviderOpenAI, nil
+	case "3", "google":
+		return models.ProviderGoogle, nil
+	case "4", "custom":
+		return models.ProviderCustom, nil
+	default:
+		return "", fmt.Errorf("invalid provider selection %q", choice)
 	}
-
-	return parseProvider(providers[choice-1])
 }
 
 // getAccountProfile prompts for or returns the profile name.
-func getAccountProfile(provider models.Provider) (string, error) {
+func getAccountProfile(reader *bufio.Reader, provider models.Provider) (string, error) {
 	if accountsAddProfile != "" {
-		return accountsAddProfile, nil
+		return strings.TrimSpace(accountsAddProfile), nil
 	}
 
 	if IsNonInteractive() {
 		return "", fmt.Errorf("--profile is required in non-interactive mode")
 	}
 
-	defaultProfile := fmt.Sprintf("%s-default", provider)
-	fmt.Fprintf(os.Stderr, "Profile name [%s]: ", defaultProfile)
-
-	var profile string
-	if _, err := fmt.Scanf("%s", &profile); err != nil || strings.TrimSpace(profile) == "" {
+	defaultProfile := "default"
+	choice, err := promptLine(reader, fmt.Sprintf("Profile name for %s [%s]: ", provider, defaultProfile))
+	if err != nil {
+		return "", err
+	}
+	if choice == "" {
 		return defaultProfile, nil
 	}
-
-	return strings.TrimSpace(profile), nil
+	return choice, nil
 }
 
 // getAccountCredential prompts for or returns the credential reference.
-func getAccountCredential(provider models.Provider) (string, error) {
-	// If env var specified, use that
+func getAccountCredential(reader *bufio.Reader, provider models.Provider, profile string, force bool) (string, error) {
+	if accountsAddCredentialRef != "" {
+		return strings.TrimSpace(accountsAddCredentialRef), nil
+	}
+
 	if accountsAddEnvVar != "" {
 		envVar := strings.TrimSpace(accountsAddEnvVar)
 		if !strings.HasPrefix(envVar, "env:") {
 			envVar = "env:" + envVar
 		}
-		// Verify the env var exists
-		varName := strings.TrimPrefix(envVar, "env:")
-		if _, ok := os.LookupEnv(varName); !ok {
-			return "", fmt.Errorf("environment variable %q not set", varName)
-		}
 		return envVar, nil
 	}
 
-	// If credential specified directly
 	if accountsAddCredential != "" {
-		// Store as literal value (not recommended for production)
-		return accountsAddCredential, nil
+		path, err := storeCredentialSecret(provider, profile, accountsAddCredential, force)
+		if err != nil {
+			return "", err
+		}
+		return "file:" + path, nil
 	}
 
 	if IsNonInteractive() {
-		return "", fmt.Errorf("--credential or --env-var is required in non-interactive mode")
+		return "", fmt.Errorf("--credential-ref, --credential, or --env-var is required in non-interactive mode")
 	}
 
-	// Prompt for credential type
-	fmt.Fprintln(os.Stderr, "How do you want to provide the API key?")
+	fmt.Fprintln(os.Stderr, "Credential source:")
 	fmt.Fprintln(os.Stderr, "  1) Environment variable (recommended)")
-	fmt.Fprintln(os.Stderr, "  2) Enter directly")
-	fmt.Fprintf(os.Stderr, "Choice [1-2]: ")
-
-	var choice int
-	if _, err := fmt.Scanf("%d", &choice); err != nil {
-		choice = 1 // default to env var
+	fmt.Fprintln(os.Stderr, "  2) Existing file")
+	fmt.Fprintln(os.Stderr, "  3) Enter secret now (stored in local file)")
+	choice, err := promptLine(reader, "Choice [1-3]: ")
+	if err != nil {
+		return "", err
 	}
 
-	switch choice {
-	case 1:
-		defaultEnv := defaultEnvVarForProvider(provider)
-		fmt.Fprintf(os.Stderr, "Environment variable name [%s]: ", defaultEnv)
-
-		var envVar string
-		if _, err := fmt.Scanf("%s", &envVar); err != nil || strings.TrimSpace(envVar) == "" {
-			envVar = defaultEnv
+	switch strings.ToLower(choice) {
+	case "", "1", "env", "environment":
+		envDefault := defaultEnvVarForProvider(provider)
+		envChoice, err := promptLine(reader, fmt.Sprintf("Environment variable name [%s]: ", envDefault))
+		if err != nil {
+			return "", err
 		}
-		envVar = strings.TrimSpace(envVar)
-
-		// Verify the env var exists
-		if _, ok := os.LookupEnv(envVar); !ok {
-			return "", fmt.Errorf("environment variable %q not set", envVar)
+		if envChoice == "" {
+			envChoice = envDefault
 		}
-
-		return "env:" + envVar, nil
-
-	case 2:
-		fmt.Fprint(os.Stderr, "API key: ")
-		var key string
-		if _, err := fmt.Scanf("%s", &key); err != nil {
-			return "", fmt.Errorf("failed to read API key: %w", err)
+		if envChoice == "" {
+			return "", fmt.Errorf("environment variable name is required")
 		}
-		key = strings.TrimSpace(key)
-		if key == "" {
+		return "env:" + envChoice, nil
+	case "2", "file":
+		path, err := promptLine(reader, "Credential file path: ")
+		if err != nil {
+			return "", err
+		}
+		if path == "" {
+			return "", fmt.Errorf("credential file path is required")
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", fmt.Errorf("failed to read credential file: %w", err)
+		}
+		if info.IsDir() {
+			return "", fmt.Errorf("credential file path is a directory")
+		}
+		return "file:" + path, nil
+	case "3", "secret", "enter":
+		secret, err := promptSecret("API key: ")
+		if err != nil {
+			return "", err
+		}
+		confirm, err := promptSecret("Confirm API key: ")
+		if err != nil {
+			return "", err
+		}
+		if secret == "" {
 			return "", fmt.Errorf("API key is required")
 		}
-		return key, nil
-
+		if secret != confirm {
+			return "", fmt.Errorf("API key confirmation does not match")
+		}
+		path, err := storeCredentialSecret(provider, profile, secret, force)
+		if err != nil {
+			return "", err
+		}
+		return "file:" + path, nil
 	default:
-		return "", fmt.Errorf("invalid selection")
+		return "", fmt.Errorf("invalid credential selection %q", choice)
 	}
 }
 
 // defaultEnvVarForProvider returns the default environment variable name for a provider.
 func defaultEnvVarForProvider(provider models.Provider) string {
-	switch provider {
-	case models.ProviderAnthropic:
-		return "ANTHROPIC_API_KEY"
-	case models.ProviderOpenAI:
-		return "OPENAI_API_KEY"
-	case models.ProviderGoogle:
-		return "GOOGLE_API_KEY"
-	default:
-		return "API_KEY"
+	env := account.ProviderEnvVar(provider)
+	if env != "" {
+		return env
 	}
+	return "API_KEY"
 }
 
-// validateCredential tests that the credential works with the provider.
-func validateCredential(ctx context.Context, provider models.Provider, credentialRef string) error {
-	// Resolve the actual credential value
-	apiKey := credentialRef
-	if strings.HasPrefix(credentialRef, "env:") {
-		varName := strings.TrimPrefix(credentialRef, "env:")
-		var ok bool
-		apiKey, ok = os.LookupEnv(varName)
-		if !ok {
-			return fmt.Errorf("environment variable %q not set", varName)
-		}
+// validateCredential tests that the credential resolves for the provider.
+func validateCredential(provider models.Provider, credentialRef string) error {
+	apiKey, err := account.ResolveCredential(credentialRef)
+	if err != nil {
+		return err
 	}
-
 	if strings.TrimSpace(apiKey) == "" {
 		return fmt.Errorf("credential is empty")
 	}
 
-	// Basic validation: check key format
 	switch provider {
 	case models.ProviderAnthropic:
 		if !strings.HasPrefix(apiKey, "sk-ant-") {
@@ -302,17 +333,109 @@ func validateCredential(ctx context.Context, provider models.Provider, credentia
 			return fmt.Errorf("invalid OpenAI API key format (expected sk-...)")
 		}
 	case models.ProviderGoogle:
-		// Google keys have various formats, just check non-empty
 		if len(apiKey) < 10 {
 			return fmt.Errorf("API key appears too short")
 		}
 	case models.ProviderCustom:
-		// No format validation for custom providers
 	}
 
-	// Note: Full API validation would require making test API calls
-	// which we skip to avoid unnecessary API usage
 	return nil
+}
+
+func promptLine(reader *bufio.Reader, prompt string) (string, error) {
+	if prompt != "" {
+		fmt.Fprint(os.Stderr, prompt)
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func promptSecret(prompt string) (string, error) {
+	if prompt != "" {
+		fmt.Fprint(os.Stderr, prompt)
+	}
+	bytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(bytes)), nil
+}
+
+func storeCredentialSecret(provider models.Provider, profile, secret string, force bool) (string, error) {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return "", fmt.Errorf("credential is empty")
+	}
+	cfg := GetConfig()
+	if cfg == nil {
+		return "", fmt.Errorf("configuration not loaded")
+	}
+	dir := filepath.Join(cfg.Global.DataDir, "credentials")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("failed to create credentials directory: %w", err)
+	}
+
+	filename := fmt.Sprintf("%s_%s.key", sanitizeCredentialPart(string(provider)), sanitizeCredentialPart(profile))
+	path := filepath.Join(dir, filename)
+	if _, err := os.Stat(path); err == nil && !force {
+		return "", fmt.Errorf("credential file already exists (use --force to overwrite)")
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("failed to check credential file: %w", err)
+	}
+
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return "", fmt.Errorf("failed to write credential file: %w", err)
+	}
+	defer file.Close()
+
+	if _, err := file.WriteString(secret); err != nil {
+		return "", fmt.Errorf("failed to write credential file: %w", err)
+	}
+	if err := file.Chmod(0600); err != nil {
+		return "", fmt.Errorf("failed to set credential file permissions: %w", err)
+	}
+	return path, nil
+}
+
+func sanitizeCredentialPart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "default"
+	}
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + ('a' - 'A'))
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
+}
+
+func promptConfirm(reader *bufio.Reader, prompt string) (bool, error) {
+	choice, err := promptLine(reader, prompt)
+	if err != nil {
+		return false, err
+	}
+	switch strings.ToLower(choice) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 var accountsCooldownCmd = &cobra.Command{
@@ -819,16 +942,16 @@ func filterAccountsWithCooldown(accounts []*models.Account) []*models.Account {
 	return filtered
 }
 
-// findAccountByProfile searches for an account by profile name.
-func findAccountByProfile(ctx context.Context, repo *db.AccountRepository, profile string) (*models.Account, error) {
+// findAccountByProfile searches for an account by provider + profile name.
+func findAccountByProfile(ctx context.Context, repo *db.AccountRepository, provider models.Provider, profile string) (*models.Account, error) {
 	accounts, err := repo.List(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	for _, acct := range accounts {
-		if acct != nil && acct.ProfileName == profile {
+		if acct != nil && acct.Provider == provider && acct.ProfileName == profile {
 			return acct, nil
 		}
 	}
-	return nil, fmt.Errorf("account with profile %q not found", profile)
+	return nil, fmt.Errorf("account %q for provider %s not found", profile, provider)
 }
