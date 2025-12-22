@@ -60,37 +60,59 @@ func RunWithConfig(cfg Config) error {
 }
 
 type model struct {
-	width            int
-	height           int
-	styles           styles.Styles
-	view             viewID
-	selectedView     viewID
-	showHelp         bool
-	showInspector    bool
-	selectedAgent    string
-	pausedAll        bool
-	statusMsg        string
-	statusWarn       bool
-	searchOpen       bool
-	searchQuery      string
-	searchTarget     viewID
-	agentFilter      string
-	paletteOpen      bool
-	paletteQuery     string
-	paletteIndex     int
-	lastUpdated      time.Time
-	stale            bool
-	stateEngine      *state.Engine
-	agentStates      map[string]models.AgentState
-	agentInfo        map[string]models.StateInfo
-	agentLast        map[string]time.Time
-	stateChanges     []StateChangeMsg
-	nodes            []nodeSummary
-	nodesPreview     bool
-	workspaceGrid    *components.WorkspaceGrid
-	selectedWsID     string // Selected workspace ID for drill-down
-	transcriptViewer *components.TranscriptViewer
-	showTranscript   bool
+	width                 int
+	height                int
+	styles                styles.Styles
+	view                  viewID
+	selectedView          viewID
+	showHelp              bool
+	showInspector         bool
+	selectedAgent         string
+	selectedAgentIndex    int
+	pausedAll             bool
+	statusMsg             string
+	statusSeverity        statusSeverity
+	statusExpiresAt       time.Time
+	searchOpen            bool
+	searchQuery           string
+	searchPrevQuery       string
+	searchTarget          viewID
+	agentFilter           string
+	approvalsOpen         bool
+	approvalsByWorkspace  map[string][]approvalItem
+	approvalsSelected     int
+	actionConfirmOpen     bool
+	actionConfirmAction   string
+	actionConfirmAgent    string
+	actionInFlightAction  string
+	actionInFlightAgent   string
+	queueEditorOpen       bool
+	queueEditors          map[string]*queueEditorState
+	queueEditOpen         bool
+	queueEditBuffer       string
+	queueEditIndex        int
+	queueEditAgent        string
+	transcriptSearchOpen  bool
+	transcriptSearchQuery string
+	paletteOpen           bool
+	paletteQuery          string
+	paletteIndex          int
+	lastUpdated           time.Time
+	stale                 bool
+	stateEngine           *state.Engine
+	agentStates           map[string]models.AgentState
+	agentInfo             map[string]models.StateInfo
+	agentLast             map[string]time.Time
+	agentCooldowns        map[string]time.Time
+	stateChanges          []StateChangeMsg
+	nodes                 []nodeSummary
+	nodesPreview          bool
+	workspacesPreview     bool
+	workspaceGrid         *components.WorkspaceGrid
+	selectedWsID          string // Selected workspace ID for drill-down
+	transcriptViewer      *components.TranscriptViewer
+	transcriptPreview     bool
+	showTranscript        bool
 }
 
 type nodeSummary struct {
@@ -101,10 +123,42 @@ type nodeSummary struct {
 	Alerts      int
 }
 
+type accountSummary struct {
+	Profile       string
+	Provider      models.Provider
+	Active        bool
+	CooldownUntil *time.Time
+}
+
+type queueItem struct {
+	ID      string
+	Kind    models.QueueItemType
+	Summary string
+	Status  models.QueueItemStatus
+}
+
+type queueEditorState struct {
+	Items    []queueItem
+	Selected int
+}
+
+type approvalItem struct {
+	ID          string
+	Agent       string
+	RequestType models.ApprovalRequestType
+	Summary     string
+	Status      models.ApprovalStatus
+	Risk        string
+	Details     string
+	Snippet     string
+	CreatedAt   time.Time
+}
+
 const (
-	minWidth   = 60
-	minHeight  = 15
-	staleAfter = 30 * time.Second
+	minWidth            = 60
+	minHeight           = 15
+	staleAfter          = 30 * time.Second
+	statusToastDuration = 5 * time.Second
 )
 
 func initialModel() model {
@@ -113,34 +167,61 @@ func initialModel() model {
 	grid.SetWorkspaces(sampleWorkspaces())
 	tv := components.NewTranscriptViewer()
 	tv.SetContent(sampleTranscript())
+	queueEditors := sampleQueueEditors()
+	approvals := sampleApprovals()
 	return model{
-		styles:           styles.DefaultStyles(),
-		view:             viewDashboard,
-		selectedView:     viewDashboard,
-		lastUpdated:      now,
-		agentStates:      make(map[string]models.AgentState),
-		agentInfo:        make(map[string]models.StateInfo),
-		agentLast:        make(map[string]time.Time),
-		stateChanges:     make([]StateChangeMsg, 0),
-		nodes:            sampleNodes(),
-		nodesPreview:     true,
-		workspaceGrid:    grid,
-		transcriptViewer: tv,
+		styles:               styles.DefaultStyles(),
+		view:                 viewDashboard,
+		selectedView:         viewDashboard,
+		lastUpdated:          now,
+		selectedAgentIndex:   -1,
+		agentStates:          make(map[string]models.AgentState),
+		agentInfo:            make(map[string]models.StateInfo),
+		agentLast:            make(map[string]time.Time),
+		agentCooldowns:       make(map[string]time.Time),
+		stateChanges:         make([]StateChangeMsg, 0),
+		nodes:                sampleNodes(),
+		nodesPreview:         true,
+		workspaceGrid:        grid,
+		workspacesPreview:    true,
+		queueEditors:         queueEditors,
+		approvalsByWorkspace: approvals,
+		transcriptViewer:     tv,
+		transcriptPreview:    true,
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return staleCheckCmd(m.lastUpdated)
+	return tea.Batch(staleCheckCmd(m.lastUpdated), toastTickCmd())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.actionConfirmOpen {
+			return m.updateActionConfirm(msg)
+		}
 		if m.paletteOpen {
 			return m.updatePalette(msg)
 		}
+		if m.transcriptSearchOpen {
+			return m.updateTranscriptSearch(msg)
+		}
 		if m.searchOpen {
 			return m.updateSearch(msg)
+		}
+		if m.queueEditOpen {
+			return m.updateQueueEdit(msg)
+		}
+		if m.queueEditorOpen && m.view == viewAgent {
+			if handled, cmd := m.updateQueueEditor(msg); handled {
+				return m, cmd
+			}
+		}
+		if m.approvalsOpen && m.view == viewWorkspace {
+			if handled, cmd := m.updateApprovalsInbox(msg); handled {
+				return m, cmd
+			}
 		}
 		if msg.String() == "tab" || msg.String() == "i" {
 			m.showInspector = !m.showInspector
@@ -148,6 +229,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.String() == "t" && m.view == viewAgent {
 			m.showTranscript = !m.showTranscript
+			if !m.showTranscript {
+				m.closeTranscriptSearch()
+			}
 			return m, nil
 		}
 		// Transcript navigation when visible
@@ -204,12 +288,56 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "/":
 				m.openSearch(viewWorkspace)
 				return m, nil
+			case "A":
+				m.approvalsOpen = !m.approvalsOpen
+				return m, nil
+			}
+		}
+		if m.view == viewAgent {
+			switch msg.String() {
+			case "up", "k", "left", "h":
+				if !m.showTranscript {
+					m.moveAgentSelection(-1)
+				}
+				return m, nil
+			case "down", "j", "right", "l":
+				if !m.showTranscript {
+					m.moveAgentSelection(1)
+				}
+				return m, nil
 			}
 		}
 		if m.view == viewAgent {
 			switch msg.String() {
 			case "/":
-				m.openSearch(viewAgent)
+				if m.showTranscript {
+					m.openTranscriptSearch()
+				} else {
+					m.openSearch(viewAgent)
+				}
+				return m, nil
+			case "Q":
+				m.queueEditorOpen = !m.queueEditorOpen
+				if !m.queueEditorOpen {
+					m.closeQueueEdit()
+				}
+				return m, nil
+			case "I":
+				return m, m.requestAgentAction(actionInterrupt, true)
+			case "R":
+				return m, m.requestAgentAction(actionRestart, true)
+			case "E":
+				return m, m.requestAgentAction(actionExportLogs, false)
+			case "P":
+				// Toggle pause/resume based on current agent state
+				action := actionPause
+				if card := m.selectedAgentCard(); card != nil && card.State == models.AgentStatePaused {
+					action = actionResume
+				}
+				return m, m.requestAgentAction(action, true)
+			case "V":
+				// View action - toggle inspector and focus on selected agent
+				m.showInspector = true
 				return m, nil
 			}
 		}
@@ -226,10 +354,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.view = viewAgent
 			m.selectedView = m.view
 			m.closeSearch()
+			m.syncAgentSelection()
 		case "g":
 			m.view = nextView(m.view)
 			m.selectedView = m.view
 			m.closeSearch()
+			if m.view == viewAgent {
+				m.syncAgentSelection()
+			}
 		case "left", "up":
 			if m.view != viewWorkspace {
 				m.selectedView = prevView(m.selectedView)
@@ -241,9 +373,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if m.view != viewWorkspace {
 				m.view = m.selectedView
+				if m.view == viewAgent {
+					m.syncAgentSelection()
+				}
 			}
 		case "ctrl+k", ":":
 			m.openPalette()
+		case "ctrl+l":
+			if m.view == viewWorkspace || m.view == viewAgent {
+				m.clearSearchFilter(m.view)
+				m.setStatus(fmt.Sprintf("%s filter cleared.", viewLabel(m.view)), statusInfo)
+				return m, nil
+			}
 		case "?":
 			m.showHelp = !m.showHelp
 		case "r":
@@ -273,11 +414,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.stateChanges) > 10 {
 			m.stateChanges = m.stateChanges[1:]
 		}
+		m.syncAgentSelection()
 		return m, staleCheckCmd(msg.Timestamp)
+	case actionCompleteMsg:
+		if msg.Action == m.actionInFlightAction && msg.Agent == m.actionInFlightAgent {
+			m.actionInFlightAction = ""
+			m.actionInFlightAgent = ""
+		}
 	case staleMsg:
 		if msg.Since.Equal(m.lastUpdated) && !m.stale {
 			m.stale = true
 		}
+	case toastTickMsg:
+		if strings.TrimSpace(m.statusMsg) != "" && !m.statusExpiresAt.IsZero() && time.Now().After(m.statusExpiresAt) {
+			m.statusMsg = ""
+			m.statusSeverity = statusInfo
+			m.statusExpiresAt = time.Time{}
+		}
+		return m, toastTickCmd()
 	case SubscriptionErrorMsg:
 		// Log subscription errors (for now just ignore)
 		// In production, might show a status indicator
@@ -296,8 +450,14 @@ func (m model) View() string {
 		m.styles.Title.Render("Swarm TUI (preview)"),
 		m.breadcrumbLine(),
 		m.navLine(),
-		"",
 	}
+	if mode := m.modeLine(); mode != "" {
+		lines = append(lines, mode)
+	}
+	if m.demoDataActive() {
+		lines = append(lines, m.demoBadgeLine())
+	}
+	lines = append(lines, "")
 
 	if m.paletteOpen {
 		lines = append(lines, m.paletteLines()...)
@@ -314,14 +474,12 @@ func (m model) View() string {
 		lines = append(lines, "", status)
 	}
 	lines = append(lines, "", m.lastUpdatedView())
-	lines = append(lines, "", m.styles.Muted.Render("Press q to quit."))
+	lines = append(lines, "", m.footerLine())
 
 	if m.width > 0 && m.height > 0 {
 		lines = append(lines, "")
 		lines = append(lines, m.styles.Muted.Render(fmt.Sprintf("Viewport: %dx%d", m.width, m.height)))
 	}
-
-	lines = append(lines, "", m.styles.Muted.Render("Shortcuts: arrows select | enter open | i inspector | q quit | ? help | g goto | / search | r refresh | 1/2/3 views"))
 
 	return fmt.Sprintf("%s\n", joinLines(lines))
 }
@@ -343,6 +501,23 @@ const (
 	viewDashboard viewID = iota
 	viewWorkspace
 	viewAgent
+)
+
+type statusSeverity int
+
+const (
+	statusInfo statusSeverity = iota
+	statusWarn
+	statusError
+)
+
+const (
+	actionInterrupt  = "interrupt"
+	actionRestart    = "restart"
+	actionExportLogs = "export_logs"
+	actionPause      = "pause"
+	actionResume     = "resume"
+	actionView       = "view"
 )
 
 func nextView(current viewID) viewID {
@@ -384,7 +559,7 @@ func (m *model) viewLines() []string {
 
 		lines := []string{
 			m.styles.Accent.Render("Workspace view"),
-			m.styles.Muted.Render("↑↓←→/hjkl: navigate | Enter: open | /: filter"),
+			m.styles.Muted.Render("↑↓←→/hjkl: navigate | Enter: open | /: filter | Ctrl+L: clear | A: approvals"),
 		}
 		if line := m.searchLine(viewWorkspace); line != "" {
 			lines = append(lines, line)
@@ -395,26 +570,55 @@ func (m *model) viewLines() []string {
 		} else {
 			lines = append(lines, m.styles.Muted.Render("No workspaces. Use 'swarm ws create' to create one."))
 		}
-		return m.renderWithInspector(lines, "Workspace inspector", m.workspaceInspectorLines())
+		inspectorTitle := "Workspace inspector"
+		if m.approvalsOpen {
+			inspectorTitle = "Approvals inbox"
+		}
+		return m.renderWithInspector(lines, inspectorTitle, m.workspaceInspectorLines())
 	case viewAgent:
 		transcriptHint := "t: transcript"
 		if m.showTranscript {
-			transcriptHint = "t: hide transcript | jk/↑↓: scroll | g/G: top/bottom | n/N: search"
+			transcriptHint = "t: hide transcript | /: search | jk/↑↓: scroll | g/G: top/bottom | n/N: next/prev"
+		}
+		queueHint := "Q: queue"
+		if m.queueEditorOpen {
+			queueHint = "Q: hide queue"
 		}
 		lines := []string{
 			m.styles.Accent.Render("Agent view"),
-			m.styles.Muted.Render(fmt.Sprintf("Confidence shows how certain state detection is. | %s", transcriptHint)),
+			m.styles.Muted.Render(fmt.Sprintf("Confidence shows how certain state detection is. | %s | %s", transcriptHint, queueHint)),
 		}
 		if line := m.searchLine(viewAgent); line != "" {
+			lines = append(lines, line)
+		}
+		lines = append(lines, m.agentSearchStatusLines()...)
+		if line := m.transcriptSearchLine(); line != "" {
+			lines = append(lines, line)
+		}
+		if line := m.actionConfirmLine(); line != "" {
 			lines = append(lines, line)
 		}
 		if m.showTranscript && m.transcriptViewer != nil {
 			// Show transcript view instead of agent cards
 			lines = append(lines, "")
+			if m.transcriptPreview {
+				lines = append(lines, m.styles.Warning.Render("Demo transcript (sample)"))
+			}
 			_, inspectorWidth, _, _ := m.inspectorLayout()
 			m.transcriptViewer.Width = m.width - inspectorWidth - 4
 			m.transcriptViewer.Height = m.height - 10
 			lines = append(lines, m.transcriptViewer.Render(m.styles))
+			return m.renderWithInspector(lines, "Agent inspector", m.agentInspectorLines())
+		}
+		cards := m.agentCards()
+		if len(cards) == 0 {
+			if strings.TrimSpace(m.agentFilter) != "" {
+				lines = append(lines, m.styles.Warning.Render("No agents match filter. Press / to edit."))
+			} else if len(m.agentStates) == 0 {
+				lines = append(lines, m.styles.Muted.Render("Sample data (no agents tracked yet)."))
+			} else {
+				lines = append(lines, m.styles.Muted.Render("No agents available."))
+			}
 			return m.renderWithInspector(lines, "Agent inspector", m.agentInspectorLines())
 		}
 		if len(m.agentStates) == 0 {
@@ -422,8 +626,17 @@ func (m *model) viewLines() []string {
 		} else {
 			lines = append(lines, m.styles.Text.Render(fmt.Sprintf("Tracking %d agent(s):", len(m.agentStates))))
 		}
-		for _, card := range m.agentCards() {
-			lines = append(lines, components.RenderAgentCard(m.styles, card), "")
+		selectedIndex := m.selectedAgentIndexFor(cards)
+		for i, card := range cards {
+			lines = append(lines, components.RenderAgentCard(m.styles, card, i == selectedIndex))
+			if i == selectedIndex {
+				// Show quick action hints below the selected card
+				actionHint := components.RenderQuickActionHint(m.styles, card.State)
+				if actionHint != "" {
+					lines = append(lines, actionHint)
+				}
+			}
+			lines = append(lines, "")
 		}
 		return m.renderWithInspector(lines, "Agent inspector", m.agentInspectorLines())
 	default:
@@ -489,7 +702,17 @@ func (m model) inspectorContentWidth() int {
 	return contentWidth
 }
 
+func (m model) selectedWorkspace() *models.Workspace {
+	if m.workspaceGrid == nil {
+		return nil
+	}
+	return m.workspaceGrid.SelectedWorkspace()
+}
+
 func (m model) workspaceInspectorLines() []string {
+	if m.approvalsOpen {
+		return m.approvalsInboxLines()
+	}
 	if m.workspaceGrid == nil {
 		return []string{m.styles.Muted.Render("No workspace data loaded.")}
 	}
@@ -536,21 +759,293 @@ func (m model) workspaceInspectorLines() []string {
 	return lines
 }
 
-func (m model) agentInspectorLines() []string {
-	cards := m.agentCards()
-	if len(cards) == 0 {
-		return []string{m.styles.Muted.Render("No agents available.")}
+func (m model) approvalsInboxLines() []string {
+	ws := m.selectedWorkspace()
+	if ws == nil {
+		return []string{m.styles.Warning.Render("No workspace selected.")}
+	}
+	approvals := m.approvalsForWorkspace(ws.ID)
+	if len(approvals) == 0 {
+		return []string{
+			m.styles.Text.Render("Approvals inbox"),
+			m.styles.Muted.Render(fmt.Sprintf("Workspace: %s", workspaceDisplayName(ws))),
+			m.styles.Muted.Render("No pending approvals."),
+			m.styles.Muted.Render("Press A to close."),
+		}
 	}
 
-	var card *components.AgentCard
+	selectedIdx := approvalSelectionIndex(m.approvalsSelected, len(approvals))
+	pending := countApprovalStatus(approvals, models.ApprovalStatusPending)
+	lines := []string{
+		m.styles.Text.Render("Approvals inbox"),
+		m.styles.Muted.Render(fmt.Sprintf("Workspace: %s", workspaceDisplayName(ws))),
+		m.styles.Muted.Render(fmt.Sprintf("Pending: %d / %d", pending, len(approvals))),
+		m.styles.Muted.Render("↑↓/jk: move | y: approve | n: deny | esc: close"),
+	}
+
+	maxWidth := m.inspectorContentWidth()
+	for i, item := range approvals {
+		prefix := "  "
+		if i == selectedIdx {
+			prefix = "> "
+		}
+		status := approvalStatusBadge(m.styles, item.Status)
+		risk := approvalRiskBadge(m.styles, item.Risk)
+		line := fmt.Sprintf("%s%s %s %s", prefix, status, risk, approvalSummary(item))
+		if maxWidth > 0 {
+			line = truncateText(line, maxWidth)
+		}
+		if i == selectedIdx {
+			lines = append(lines, m.styles.Accent.Render(line))
+		} else {
+			lines = append(lines, m.styles.Text.Render(line))
+		}
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, m.approvalDetailLines(approvals[selectedIdx], maxWidth)...)
+
+	return lines
+}
+
+func (m model) approvalDetailLines(item approvalItem, maxWidth int) []string {
+	lines := []string{
+		m.styles.Text.Render("Details"),
+		m.styles.Muted.Render(fmt.Sprintf("Agent: %s", defaultLabel(item.Agent))),
+		m.styles.Muted.Render(fmt.Sprintf("Type: %s", defaultLabel(string(item.RequestType)))),
+		m.styles.Muted.Render(fmt.Sprintf("Status: %s", approvalStatusLabel(m.styles, item.Status))),
+	}
+	if item.Risk != "" {
+		lines = append(lines, m.styles.Muted.Render(fmt.Sprintf("Risk: %s", approvalRiskLabel(m.styles, item.Risk))))
+	}
+	if summary := strings.TrimSpace(item.Summary); summary != "" {
+		lines = append(lines, m.styles.Muted.Render("Summary:"))
+		lines = append(lines, wrapIndented(summary, maxWidth, m.styles.Muted, "  ")...)
+	}
+	if details := strings.TrimSpace(item.Details); details != "" {
+		lines = append(lines, m.styles.Muted.Render("Context:"))
+		lines = append(lines, wrapIndented(details, maxWidth, m.styles.Muted, "  ")...)
+	}
+	if snippet := strings.TrimSpace(item.Snippet); snippet != "" {
+		lines = append(lines, m.styles.Muted.Render("Snippet:"))
+		for _, raw := range strings.Split(snippet, "\n") {
+			line := raw
+			if maxWidth > 0 {
+				line = truncateText(line, maxWidth-2)
+			}
+			lines = append(lines, m.styles.Muted.Render("  "+line))
+		}
+	}
+	return lines
+}
+
+func (m model) approvalsForWorkspace(id string) []approvalItem {
+	if strings.TrimSpace(id) == "" || m.approvalsByWorkspace == nil {
+		return nil
+	}
+	return m.approvalsByWorkspace[id]
+}
+
+func approvalSelectionIndex(idx, count int) int {
+	if count <= 0 {
+		return -1
+	}
+	if idx < 0 {
+		return 0
+	}
+	if idx >= count {
+		return count - 1
+	}
+	return idx
+}
+
+func approvalSummary(item approvalItem) string {
+	agent := defaultLabel(item.Agent)
+	summary := strings.TrimSpace(item.Summary)
+	if summary == "" {
+		summary = "Approval requested"
+	}
+	return fmt.Sprintf("%s — %s", agent, summary)
+}
+
+func approvalStatusBadge(style styles.Styles, status models.ApprovalStatus) string {
+	switch status {
+	case models.ApprovalStatusApproved:
+		return style.Success.Render("[OK]")
+	case models.ApprovalStatusDenied:
+		return style.Error.Render("[DENY]")
+	case models.ApprovalStatusExpired:
+		return style.Muted.Render("[EXP]")
+	default:
+		return style.Warning.Render("[PEND]")
+	}
+}
+
+func approvalStatusLabel(style styles.Styles, status models.ApprovalStatus) string {
+	switch status {
+	case models.ApprovalStatusApproved:
+		return style.Success.Render("approved")
+	case models.ApprovalStatusDenied:
+		return style.Error.Render("denied")
+	case models.ApprovalStatusExpired:
+		return style.Muted.Render("expired")
+	default:
+		return style.Warning.Render("pending")
+	}
+}
+
+func approvalRiskBadge(style styles.Styles, risk string) string {
+	switch strings.ToLower(strings.TrimSpace(risk)) {
+	case "high":
+		return style.Error.Render("[HIGH]")
+	case "medium":
+		return style.Warning.Render("[MED]")
+	case "low":
+		return style.Success.Render("[LOW]")
+	default:
+		return style.Muted.Render("[--]")
+	}
+}
+
+func approvalRiskLabel(style styles.Styles, risk string) string {
+	switch strings.ToLower(strings.TrimSpace(risk)) {
+	case "high":
+		return style.Error.Render("high")
+	case "medium":
+		return style.Warning.Render("medium")
+	case "low":
+		return style.Success.Render("low")
+	default:
+		return style.Muted.Render("unknown")
+	}
+}
+
+func countApprovalStatus(items []approvalItem, status models.ApprovalStatus) int {
+	count := 0
+	for _, item := range items {
+		if item.Status == status {
+			count++
+		}
+	}
+	return count
+}
+
+func wrapIndented(text string, maxWidth int, style lipgloss.Style, indent string) []string {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	contentWidth := maxWidth
+	if contentWidth > 0 && len(indent) < contentWidth {
+		contentWidth = maxWidth - len(indent)
+	}
+	lines := wrapText(text, contentWidth)
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		out = append(out, style.Render(indent+line))
+	}
+	return out
+}
+
+func (m model) selectedAgentCard() *components.AgentCard {
+	cards := m.agentCards()
+	if len(cards) == 0 {
+		return nil
+	}
 	if strings.TrimSpace(m.selectedAgent) != "" {
-		card = findAgentCardByName(cards, m.selectedAgent)
+		if card := findAgentCardByName(cards, m.selectedAgent); card != nil {
+			return card
+		}
 	}
-	if card == nil {
-		card = mostRecentAgentCard(cards)
+	if m.selectedAgentIndex >= 0 && m.selectedAgentIndex < len(cards) {
+		return &cards[m.selectedAgentIndex]
 	}
+	return &cards[0]
+}
+
+func (m model) selectedAgentIndexFor(cards []components.AgentCard) int {
+	if len(cards) == 0 {
+		return -1
+	}
+	if name := strings.TrimSpace(m.selectedAgent); name != "" {
+		for i := range cards {
+			if strings.EqualFold(cards[i].Name, name) {
+				return i
+			}
+		}
+	}
+	if m.selectedAgentIndex >= 0 && m.selectedAgentIndex < len(cards) {
+		return m.selectedAgentIndex
+	}
+	return 0
+}
+
+func (m *model) syncAgentSelection() {
+	cards := m.agentCards()
+	m.ensureAgentSelection(cards)
+}
+
+func (m *model) ensureAgentSelection(cards []components.AgentCard) {
+	if len(cards) == 0 {
+		m.selectedAgent = ""
+		m.selectedAgentIndex = -1
+		return
+	}
+	if name := strings.TrimSpace(m.selectedAgent); name != "" {
+		for i := range cards {
+			if strings.EqualFold(cards[i].Name, name) {
+				m.selectedAgentIndex = i
+				return
+			}
+		}
+	}
+	idx := m.selectedAgentIndex
+	if idx < 0 {
+		idx = 0
+	} else if idx >= len(cards) {
+		idx = len(cards) - 1
+	}
+	m.selectedAgentIndex = idx
+	m.selectedAgent = cards[idx].Name
+}
+
+func (m *model) moveAgentSelection(delta int) {
+	cards := m.agentCards()
+	if len(cards) == 0 {
+		m.selectedAgent = ""
+		m.selectedAgentIndex = -1
+		return
+	}
+	m.ensureAgentSelection(cards)
+	next := m.selectedAgentIndex + delta
+	if next < 0 {
+		next = 0
+	} else if next >= len(cards) {
+		next = len(cards) - 1
+	}
+	if next == m.selectedAgentIndex {
+		return
+	}
+	m.selectedAgentIndex = next
+	m.selectedAgent = cards[next].Name
+}
+
+func (m model) agentInspectorLines() []string {
+	if m.queueEditorOpen {
+		return m.queueEditorLines()
+	}
+	cards := m.agentCards()
+	if len(cards) == 0 {
+		if strings.TrimSpace(m.agentFilter) != "" {
+			return []string{
+				m.styles.Warning.Render("No agents match filter."),
+				m.styles.Muted.Render("Press / to edit filter."),
+			}
+		}
+		return []string{m.styles.Muted.Render("No agents available.")}
+	}
+	card := m.selectedAgentCard()
 	if card == nil {
-		return []string{m.styles.Muted.Render("No agent selected.")}
+		return []string{m.styles.Muted.Render("No agents available.")}
 	}
 
 	stateBadge := components.RenderAgentStateBadge(m.styles, card.State)
@@ -575,9 +1070,111 @@ func (m model) agentInspectorLines() []string {
 		queue = fmt.Sprintf("%d", card.QueueLength)
 	}
 	lines = append(lines, m.styles.Muted.Render(fmt.Sprintf("Queue: %s", queue)))
+	if line := cooldownStatusLine(m.styles, card.CooldownUntil); line != "" {
+		lines = append(lines, line)
+	}
 	lines = append(lines, m.styles.Muted.Render(fmt.Sprintf("Last: %s", formatActivityTime(card.LastActivity))))
+	if line := m.actionProgressLine(); line != "" {
+		lines = append(lines, line)
+	}
+	lines = append(lines, m.styles.Muted.Render("Actions: [I] Interrupt | [R] Restart | [E] Export logs"))
 
 	return lines
+}
+
+func (m model) queueEditorLines() []string {
+	card := m.selectedAgentCard()
+	agent := "--"
+	if card != nil {
+		agent = card.Name
+	}
+
+	lines := []string{
+		m.styles.Text.Render("Queue editor"),
+		m.styles.Muted.Render("↑↓/jk: move | J/K: reorder | e: edit | d: delete"),
+		m.styles.Muted.Render("m: add msg | p: add pause | esc: close"),
+		m.styles.Muted.Render(fmt.Sprintf("Agent: %s", agent)),
+	}
+
+	if card == nil {
+		lines = append(lines, m.styles.Warning.Render("No agent selected."))
+		return lines
+	}
+
+	state := m.queueEditorStateForAgent(agent)
+	if state == nil || len(state.Items) == 0 {
+		lines = append(lines, m.styles.Muted.Render("Queue is empty. Press m/p to add items."))
+		if m.queueEditOpen {
+			lines = append(lines, m.queueEditLines()...)
+		}
+		return lines
+	}
+
+	maxWidth := m.inspectorContentWidth()
+	for i, item := range state.Items {
+		prefix := "  "
+		if i == state.Selected {
+			prefix = "> "
+		}
+		label := fmt.Sprintf("[%s] %s", queueItemTypeLabel(item.Kind), queueItemSummary(item))
+		if item.Status != "" {
+			label = fmt.Sprintf("[%s] %s (%s)", queueItemTypeLabel(item.Kind), queueItemSummary(item), item.Status)
+		}
+		line := prefix + label
+		if maxWidth > 0 {
+			line = truncateText(line, maxWidth)
+		}
+		if i == state.Selected {
+			lines = append(lines, m.styles.Accent.Render(line))
+		} else {
+			lines = append(lines, m.styles.Text.Render(line))
+		}
+	}
+
+	if m.queueEditOpen {
+		lines = append(lines, m.queueEditLines()...)
+	}
+
+	return lines
+}
+
+func (m model) queueEditorStateForAgent(agent string) *queueEditorState {
+	if strings.TrimSpace(agent) == "" || m.queueEditors == nil {
+		return nil
+	}
+	return m.queueEditors[agent]
+}
+
+func (m model) queueEditLines() []string {
+	buffer := strings.TrimSpace(m.queueEditBuffer)
+	if buffer == "" {
+		buffer = "..."
+	}
+	return []string{
+		m.styles.Info.Render(fmt.Sprintf("Edit: %s", buffer)),
+		m.styles.Muted.Render("enter: save | esc: cancel"),
+	}
+}
+
+func queueItemSummary(item queueItem) string {
+	summary := strings.TrimSpace(item.Summary)
+	if summary == "" {
+		return "--"
+	}
+	return summary
+}
+
+func queueItemTypeLabel(kind models.QueueItemType) string {
+	switch kind {
+	case models.QueueItemTypeMessage:
+		return "MSG"
+	case models.QueueItemTypePause:
+		return "PAUSE"
+	case models.QueueItemTypeConditional:
+		return "COND"
+	default:
+		return strings.ToUpper(string(kind))
+	}
 }
 
 func findAgentCardByName(cards []components.AgentCard, name string) *components.AgentCard {
@@ -627,6 +1224,33 @@ func formatActivityTime(ts *time.Time) string {
 		return "--"
 	}
 	return ts.Format("15:04:05")
+}
+
+func cooldownStatusLine(style styles.Styles, until *time.Time) string {
+	if until == nil || until.IsZero() {
+		return ""
+	}
+	remaining := time.Until(*until)
+	if remaining <= 0 {
+		return style.Muted.Render("Cooldown: expired")
+	}
+	return style.Warning.Render(fmt.Sprintf("Cooldown: %s", formatCooldownDuration(remaining)))
+}
+
+func formatCooldownDuration(value time.Duration) string {
+	if value < time.Second {
+		return "<1s"
+	}
+	if value < time.Minute {
+		return value.Round(time.Second).String()
+	}
+	if value < time.Hour {
+		rounded := value.Round(time.Second)
+		minutes := int(rounded.Minutes())
+		seconds := int(rounded.Seconds()) % 60
+		return fmt.Sprintf("%dm%02ds", minutes, seconds)
+	}
+	return value.Round(time.Minute).String()
 }
 
 func defaultLabel(value string) string {
@@ -942,6 +1566,37 @@ func (m model) navLabel(view viewID) string {
 	return m.styles.Muted.Render(label)
 }
 
+func (m model) modeLine() string {
+	if m.paletteOpen {
+		return m.styles.Info.Render("Mode: Palette")
+	}
+	if m.searchOpen {
+		return m.styles.Info.Render(fmt.Sprintf("Mode: Search (%s)", viewLabel(m.searchTarget)))
+	}
+	if m.transcriptSearchOpen {
+		return m.styles.Info.Render("Mode: Transcript search")
+	}
+	if m.showTranscript && m.view == viewAgent {
+		return m.styles.Info.Render("Mode: Transcript")
+	}
+	return ""
+}
+
+func (m model) demoDataActive() bool {
+	if m.nodesPreview || m.workspacesPreview || m.transcriptPreview {
+		return true
+	}
+	return len(m.agentStates) == 0
+}
+
+func (m model) demoBadgeLine() string {
+	return m.styles.Warning.Render("Demo data (simulated)")
+}
+
+func (m model) footerLine() string {
+	return m.styles.Muted.Render("Keys: ? help | ctrl+k palette | q quit")
+}
+
 func viewLabel(view viewID) string {
 	switch view {
 	case viewDashboard:
@@ -956,26 +1611,52 @@ func viewLabel(view viewID) string {
 }
 
 func (m model) helpLines() []string {
-	return []string{
-		m.styles.Accent.Render("Help"),
-		m.styles.Muted.Render("Arrows: select view"),
-		m.styles.Muted.Render("Enter: open selected view"),
-		m.styles.Muted.Render("i/tab: toggle inspector"),
-		m.styles.Muted.Render("g: cycle views"),
-		m.styles.Muted.Render("q: quit"),
+	lines := []string{m.styles.Accent.Render("Help")}
+	if m.paletteOpen {
+		lines = append(lines, m.styles.Muted.Render("Palette: type to filter | Enter run | Esc close | ! show disabled"))
+		return lines
 	}
+	if m.searchOpen {
+		lines = append(lines, m.styles.Muted.Render(
+			fmt.Sprintf("Search (%s): type to filter | Enter apply | Esc cancel | Ctrl+L clear", viewLabel(m.searchTarget)),
+		))
+		return lines
+	}
+	if m.transcriptSearchOpen {
+		lines = append(lines, m.styles.Muted.Render("Transcript search: type to filter | Enter apply | Esc cancel"))
+	}
+
+	switch m.view {
+	case viewDashboard:
+		lines = append(lines, m.styles.Muted.Render("Views: 1/2/3 switch | g cycle"))
+	case viewWorkspace:
+		lines = append(lines, m.styles.Muted.Render("Workspace: ↑↓←→/hjkl move | Enter open | / filter | Ctrl+L clear | A approvals"))
+	case viewAgent:
+		lines = append(lines, m.styles.Muted.Render("Agents: ↑↓←→/hjkl select | / filter | Ctrl+L clear | t transcript | Q queue"))
+		if m.showTranscript {
+			lines = append(lines, m.styles.Muted.Render("Transcript: jk/↑↓ scroll | g/G top/bottom | n/N next/prev | / search"))
+		}
+		lines = append(lines, m.styles.Muted.Render("Actions: I interrupt | R restart | E export"))
+	}
+
+	lines = append(lines, m.styles.Muted.Render("Global: ctrl+k palette | i/tab inspector | ? help | q quit"))
+	return lines
 }
 
 type paletteAction struct {
-	ID    string
-	Label string
-	Hint  string
+	ID             string
+	Label          string
+	Hint           string
+	Views          []viewID
+	Disabled       bool
+	DisabledReason string
 }
 
 func (m *model) openPalette() {
 	m.paletteOpen = true
 	m.paletteQuery = ""
 	m.paletteIndex = 0
+	m.resetPaletteIndex()
 }
 
 func (m *model) closePalette() {
@@ -989,6 +1670,7 @@ func (m model) paletteLines() []string {
 	lines := []string{
 		m.styles.Accent.Render("Command Palette"),
 		m.styles.Muted.Render("Type to filter. Enter to run. Esc to close."),
+		m.styles.Muted.Render("Prefix ! to include disabled actions."),
 		m.styles.Text.Render(fmt.Sprintf("> %s", m.paletteQuery)),
 	}
 
@@ -1003,11 +1685,18 @@ func (m model) paletteLines() []string {
 		if action.Hint != "" {
 			label = fmt.Sprintf("%s — %s", action.Label, action.Hint)
 		}
-		if i == m.paletteIndex {
-			lines = append(lines, m.styles.Accent.Render(prefix+label))
-		} else {
-			lines = append(lines, m.styles.Muted.Render(prefix+label))
+		if action.Disabled {
+			reason := action.DisabledReason
+			if strings.TrimSpace(reason) == "" {
+				reason = "Coming soon"
+			}
+			label = fmt.Sprintf("%s — %s", label, reason)
 		}
+		if i == m.paletteIndex && !action.Disabled {
+			lines = append(lines, m.styles.Accent.Render(prefix+label))
+			continue
+		}
+		lines = append(lines, m.styles.Muted.Render(prefix+label))
 	}
 
 	return lines
@@ -1021,11 +1710,54 @@ func (m model) paletteActions() []paletteAction {
 		helpLabel = "Hide help"
 	}
 
+	hasAgent := m.selectedAgentCard() != nil
+
 	actions := []paletteAction{
 		{ID: "view.dashboard", Label: "Navigate to dashboard", Hint: "1"},
 		{ID: "view.workspace", Label: "Navigate to workspace", Hint: "2"},
 		{ID: "view.agent", Label: "Navigate to agents", Hint: "3"},
-		{ID: "agent.spawn", Label: "Spawn agent", Hint: "workspace"},
+		{
+			ID:             "agent.spawn",
+			Label:          "Spawn agent",
+			Hint:           "workspace",
+			Views:          []viewID{viewWorkspace},
+			Disabled:       true,
+			DisabledReason: "Coming soon",
+		},
+		{
+			ID:       "agent.pause",
+			Label:    "Pause agent",
+			Hint:     "P",
+			Views:    []viewID{viewAgent},
+			Disabled: !hasAgent,
+		},
+		{
+			ID:       "agent.resume",
+			Label:    "Resume agent",
+			Views:    []viewID{viewAgent},
+			Disabled: !hasAgent,
+		},
+		{
+			ID:       "agent.restart",
+			Label:    "Restart agent",
+			Hint:     "R",
+			Views:    []viewID{viewAgent},
+			Disabled: !hasAgent,
+		},
+		{
+			ID:       "agent.interrupt",
+			Label:    "Interrupt agent",
+			Hint:     "I",
+			Views:    []viewID{viewAgent},
+			Disabled: !hasAgent,
+		},
+		{
+			ID:       "agent.export_logs",
+			Label:    "Export logs",
+			Hint:     "E",
+			Views:    []viewID{viewAgent},
+			Disabled: !hasAgent,
+		},
 	}
 
 	if m.pausedAll {
@@ -1036,7 +1768,7 @@ func (m model) paletteActions() []paletteAction {
 
 	actions = append(actions,
 		paletteAction{ID: "refresh", Label: "Refresh", Hint: "r"},
-		paletteAction{ID: "settings", Label: "Settings"},
+		paletteAction{ID: "settings", Label: "Settings", Disabled: true, DisabledReason: "Coming soon"},
 		paletteAction{ID: helpID, Label: helpLabel, Hint: "?"},
 		paletteAction{ID: "quit", Label: "Quit", Hint: "q"},
 	)
@@ -1045,8 +1777,24 @@ func (m model) paletteActions() []paletteAction {
 }
 
 func (m model) filteredPaletteActions() []paletteAction {
-	query := strings.TrimSpace(strings.ToLower(m.paletteQuery))
+	rawQuery := strings.TrimSpace(m.paletteQuery)
+	includeDisabled := strings.HasPrefix(rawQuery, "!")
+	if includeDisabled {
+		rawQuery = strings.TrimSpace(strings.TrimPrefix(rawQuery, "!"))
+	}
+	query := strings.TrimSpace(strings.ToLower(rawQuery))
 	actions := m.paletteActions()
+	actions = filterPaletteActionsForView(actions, m.view)
+	if !includeDisabled {
+		enabled := make([]paletteAction, 0, len(actions))
+		for _, action := range actions {
+			if action.Disabled {
+				continue
+			}
+			enabled = append(enabled, action)
+		}
+		actions = enabled
+	}
 	if query == "" {
 		return actions
 	}
@@ -1077,13 +1825,70 @@ func (m model) paletteSelectionMax() int {
 	return len(actions) - 1
 }
 
+func firstSelectableIndex(actions []paletteAction) int {
+	for i, action := range actions {
+		if !action.Disabled {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m *model) resetPaletteIndex() {
+	actions := m.filteredPaletteActions()
+	idx := firstSelectableIndex(actions)
+	if idx >= 0 {
+		m.paletteIndex = idx
+		return
+	}
+	m.paletteIndex = 0
+}
+
+func (m *model) movePaletteIndex(delta int) {
+	actions := m.filteredPaletteActions()
+	if len(actions) == 0 {
+		m.paletteIndex = 0
+		return
+	}
+	if delta == 0 {
+		return
+	}
+	idx := m.paletteIndex
+	if idx < 0 || idx >= len(actions) {
+		idx = 0
+	}
+	for i := 0; i < len(actions); i++ {
+		idx += delta
+		if idx < 0 {
+			idx = len(actions) - 1
+		} else if idx >= len(actions) {
+			idx = 0
+		}
+		if !actions[idx].Disabled {
+			m.paletteIndex = idx
+			return
+		}
+	}
+	m.paletteIndex = 0
+}
+
 func (m *model) clampPaletteIndex() {
-	max := m.paletteSelectionMax()
+	actions := m.filteredPaletteActions()
+	if len(actions) == 0 {
+		m.paletteIndex = 0
+		return
+	}
+	max := len(actions) - 1
 	if m.paletteIndex < 0 {
 		m.paletteIndex = 0
 	}
 	if m.paletteIndex > max {
 		m.paletteIndex = max
+	}
+	if actions[m.paletteIndex].Disabled {
+		if idx := firstSelectableIndex(actions); idx >= 0 {
+			m.paletteIndex = idx
+		}
 	}
 }
 
@@ -1091,10 +1896,10 @@ func (m model) updatePalette(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyRunes:
 		m.paletteQuery += string(msg.Runes)
-		m.paletteIndex = 0
+		m.resetPaletteIndex()
 	case tea.KeyBackspace, tea.KeyDelete:
 		m.paletteQuery = trimLastRune(m.paletteQuery)
-		m.paletteIndex = 0
+		m.resetPaletteIndex()
 	}
 
 	switch msg.String() {
@@ -1106,17 +1911,30 @@ func (m model) updatePalette(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.closePalette()
 			return m, nil
 		}
+		if m.paletteIndex < 0 || m.paletteIndex >= len(actions) {
+			m.closePalette()
+			return m, nil
+		}
 		action := actions[m.paletteIndex]
+		if action.Disabled {
+			reason := action.DisabledReason
+			if strings.TrimSpace(reason) == "" {
+				reason = "Coming soon"
+			}
+			m.closePalette()
+			m.setStatus(fmt.Sprintf("%s: %s", action.Label, reason), statusWarn)
+			return m, nil
+		}
 		m.closePalette()
 		return m, m.applyPaletteAction(action)
 	case "up":
-		m.paletteIndex--
+		m.movePaletteIndex(-1)
 	case "down":
-		m.paletteIndex++
+		m.movePaletteIndex(1)
 	case "ctrl+n":
-		m.paletteIndex++
+		m.movePaletteIndex(1)
 	case "ctrl+p":
-		m.paletteIndex--
+		m.movePaletteIndex(-1)
 	}
 
 	m.clampPaletteIndex()
@@ -1135,19 +1953,29 @@ func (m *model) applyPaletteAction(action paletteAction) tea.Cmd {
 		m.view = viewAgent
 		m.selectedView = viewAgent
 	case "agent.spawn":
-		m.setStatus("Spawn agent not wired yet.", true)
+		m.setStatus("Spawn agent not wired yet.", statusWarn)
+	case "agent.pause":
+		return m.requestAgentAction(actionPause, true)
+	case "agent.resume":
+		return m.requestAgentAction(actionResume, true)
+	case "agent.restart":
+		return m.requestAgentAction(actionRestart, true)
+	case "agent.interrupt":
+		return m.requestAgentAction(actionInterrupt, true)
+	case "agent.export_logs":
+		return m.requestAgentAction(actionExportLogs, false)
 	case "agents.pause_all":
 		m.pausedAll = true
-		m.setStatus("Paused all agents (preview).", false)
+		m.setStatus("Paused all agents (preview).", statusInfo)
 	case "agents.resume_all":
 		m.pausedAll = false
-		m.setStatus("Resumed all agents (preview).", false)
+		m.setStatus("Resumed all agents (preview).", statusInfo)
 	case "refresh":
 		m.lastUpdated = time.Now()
 		m.stale = false
 		return staleCheckCmd(m.lastUpdated)
 	case "settings":
-		m.setStatus("Settings panel not wired yet.", true)
+		m.setStatus("Settings panel not wired yet.", statusWarn)
 	case "help.show":
 		m.showHelp = true
 	case "help.hide":
@@ -1156,6 +1984,49 @@ func (m *model) applyPaletteAction(action paletteAction) tea.Cmd {
 		return tea.Quit
 	}
 	return nil
+}
+
+func filterPaletteActionsForView(actions []paletteAction, view viewID) []paletteAction {
+	if len(actions) == 0 {
+		return actions
+	}
+
+	filtered := make([]paletteAction, 0, len(actions))
+	for _, action := range actions {
+		if !actionVisibleInView(action, view) {
+			continue
+		}
+		if isRedundantViewAction(action.ID, view) {
+			continue
+		}
+		filtered = append(filtered, action)
+	}
+	return filtered
+}
+
+func actionVisibleInView(action paletteAction, view viewID) bool {
+	if len(action.Views) == 0 {
+		return true
+	}
+	for _, v := range action.Views {
+		if v == view {
+			return true
+		}
+	}
+	return false
+}
+
+func isRedundantViewAction(actionID string, view viewID) bool {
+	switch view {
+	case viewDashboard:
+		return actionID == "view.dashboard"
+	case viewWorkspace:
+		return actionID == "view.workspace"
+	case viewAgent:
+		return actionID == "view.agent"
+	default:
+		return false
+	}
 }
 
 func trimLastRune(value string) string {
@@ -1173,12 +2044,31 @@ type staleMsg struct {
 	Since time.Time
 }
 
+type toastTickMsg struct{}
+
+type actionCompleteMsg struct {
+	Action string
+	Agent  string
+}
+
 func staleCheckCmd(since time.Time) tea.Cmd {
 	if since.IsZero() {
 		return nil
 	}
 	return tea.Tick(staleAfter, func(time.Time) tea.Msg {
 		return staleMsg{Since: since}
+	})
+}
+
+func toastTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		return toastTickMsg{}
+	})
+}
+
+func actionCompleteCmd(action, agent string) tea.Cmd {
+	return tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+		return actionCompleteMsg{Action: action, Agent: agent}
 	})
 }
 
@@ -1205,15 +2095,23 @@ func (m model) statusLine() string {
 	if strings.TrimSpace(m.statusMsg) == "" {
 		return ""
 	}
-	if m.statusWarn {
+	switch m.statusSeverity {
+	case statusWarn:
 		return m.styles.Warning.Render(m.statusMsg)
+	case statusError:
+		return m.styles.Error.Render(m.statusMsg)
 	}
 	return m.styles.Info.Render(m.statusMsg)
 }
 
-func (m *model) setStatus(message string, warning bool) {
+func (m *model) setStatus(message string, severity statusSeverity) {
 	m.statusMsg = message
-	m.statusWarn = warning
+	m.statusSeverity = severity
+	if strings.TrimSpace(message) == "" {
+		m.statusExpiresAt = time.Time{}
+		return
+	}
+	m.statusExpiresAt = time.Now().Add(statusToastDuration)
 }
 
 func shortID(value string) string {
@@ -1240,8 +2138,12 @@ func workspaceDisplayName(ws *models.Workspace) string {
 }
 
 func (m model) agentCards() []components.AgentCard {
+	return filterAgentCards(m.allAgentCards(), m.agentFilter)
+}
+
+func (m model) allAgentCards() []components.AgentCard {
 	if len(m.agentStates) == 0 {
-		return filterAgentCards(sampleAgentCards(), m.agentFilter)
+		return sampleAgentCards()
 	}
 
 	cards := make([]components.AgentCard, 0, len(m.agentStates))
@@ -1252,16 +2154,19 @@ func (m model) agentCards() []components.AgentCard {
 			last := ts
 			lastPtr = &last
 		}
-		card := components.AgentCard{
-			Name:         fmt.Sprintf("Agent %s", shortID(id)),
-			State:        state,
-			Confidence:   info.Confidence,
-			Reason:       info.Reason,
-			QueueLength:  -1,
-			LastActivity: lastPtr,
+		var cooldownPtr *time.Time
+		if until, ok := m.agentCooldowns[id]; ok && !until.IsZero() {
+			cooldown := until
+			cooldownPtr = &cooldown
 		}
-		if !matchesSearch(m.agentFilter, agentCardHaystack(card)) {
-			continue
+		card := components.AgentCard{
+			Name:          fmt.Sprintf("Agent %s", shortID(id)),
+			State:         state,
+			Confidence:    info.Confidence,
+			Reason:        info.Reason,
+			QueueLength:   -1,
+			LastActivity:  lastPtr,
+			CooldownUntil: cooldownPtr,
 		}
 		cards = append(cards, card)
 	}
@@ -1427,6 +2332,18 @@ func sampleAgentCards() []components.AgentCard {
 			QueueLength:  0,
 			LastActivity: timePtr(now.Add(-35 * time.Minute)),
 		},
+		{
+			Name:          "Agent D4",
+			Type:          models.AgentTypeOpenCode,
+			Model:         "gpt-5",
+			Profile:       "primary",
+			State:         models.AgentStateRateLimited,
+			Confidence:    models.StateConfidenceHigh,
+			Reason:        "Rate limit hit, cooldown active",
+			QueueLength:   0,
+			LastActivity:  timePtr(now.Add(-1 * time.Minute)),
+			CooldownUntil: timePtr(now.Add(4 * time.Minute)),
+		},
 	}
 }
 
@@ -1445,22 +2362,29 @@ func (m *model) openSearch(target viewID) {
 	case viewAgent:
 		m.searchQuery = m.agentFilter
 	}
+	m.searchPrevQuery = m.searchQuery
 	m.applySearchQuery()
 }
 
 func (m *model) closeSearch() {
 	m.searchOpen = false
 	m.searchQuery = ""
+	m.searchPrevQuery = ""
 }
 
 func (m *model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.closeSearch()
+		m.cancelSearch()
 		return m, nil
 	case "enter":
 		m.applySearchSelection()
 		m.closeSearch()
+		return m, nil
+	case "ctrl+l":
+		m.clearSearchFilter(m.searchTarget)
+		m.closeSearch()
+		m.setStatus(fmt.Sprintf("%s filter cleared.", viewLabel(m.searchTarget)), statusInfo)
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
@@ -1477,6 +2401,12 @@ func (m *model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *model) cancelSearch() {
+	m.searchQuery = m.searchPrevQuery
+	m.applySearchQuery()
+	m.closeSearch()
+}
+
 func (m *model) applySearchQuery() {
 	switch m.searchTarget {
 	case viewWorkspace:
@@ -1485,6 +2415,19 @@ func (m *model) applySearchQuery() {
 		}
 	case viewAgent:
 		m.agentFilter = m.searchQuery
+		m.syncAgentSelection()
+	}
+}
+
+func (m *model) clearSearchFilter(target viewID) {
+	switch target {
+	case viewWorkspace:
+		if m.workspaceGrid != nil {
+			m.workspaceGrid.SetFilter("")
+		}
+	case viewAgent:
+		m.agentFilter = ""
+		m.syncAgentSelection()
 	}
 }
 
@@ -1502,15 +2445,400 @@ func (m *model) applySearchSelection() {
 			return
 		}
 		m.selectedWsID = ws.ID
-		m.setStatus(fmt.Sprintf("Jumped to workspace %s", workspaceDisplayName(ws)), false)
+		m.setStatus(fmt.Sprintf("Jumped to workspace %s", workspaceDisplayName(ws)), statusInfo)
 	case viewAgent:
 		cards := m.agentCards()
 		if len(cards) == 0 {
+			m.setStatus("No agents match filter.", statusWarn)
 			return
 		}
+		m.selectedAgentIndex = 0
 		m.selectedAgent = cards[0].Name
-		m.setStatus(fmt.Sprintf("Jumped to agent %s", cards[0].Name), false)
+		m.setStatus(fmt.Sprintf("Jumped to agent %s", cards[0].Name), statusInfo)
 	}
+}
+
+func (m *model) requestAgentAction(action string, requiresConfirm bool) tea.Cmd {
+	card := m.selectedAgentCard()
+	if card == nil {
+		m.setStatus("No agent selected.", statusWarn)
+		return nil
+	}
+	agent := card.Name
+	if requiresConfirm {
+		m.openActionConfirm(action, agent)
+		return nil
+	}
+	return m.applyAgentAction(action, agent)
+}
+
+func (m *model) openActionConfirm(action, agent string) {
+	m.actionConfirmOpen = true
+	m.actionConfirmAction = action
+	m.actionConfirmAgent = agent
+}
+
+func (m *model) closeActionConfirm() {
+	m.actionConfirmOpen = false
+	m.actionConfirmAction = ""
+	m.actionConfirmAgent = ""
+}
+
+func (m *model) updateActionConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y", "enter":
+		action := m.actionConfirmAction
+		agent := m.actionConfirmAgent
+		m.closeActionConfirm()
+		return m, m.applyAgentAction(action, agent)
+	case "n", "N", "esc":
+		label := actionLabel(m.actionConfirmAction)
+		agent := m.actionConfirmAgent
+		m.closeActionConfirm()
+		if label != "" && agent != "" {
+			m.setStatus(fmt.Sprintf("%s canceled for %s.", label, agent), statusInfo)
+		} else {
+			m.setStatus("Action canceled.", statusInfo)
+		}
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m *model) applyAgentAction(action, agent string) tea.Cmd {
+	label := actionLabel(action)
+	m.actionInFlightAction = action
+	m.actionInFlightAgent = agent
+	switch action {
+	case actionInterrupt:
+		m.setStatus(fmt.Sprintf("%s requested for %s (preview).", label, agent), statusInfo)
+	case actionRestart:
+		m.setStatus(fmt.Sprintf("%s requested for %s (preview).", label, agent), statusInfo)
+	case actionExportLogs:
+		m.setStatus(fmt.Sprintf("Exporting logs for %s (preview).", agent), statusInfo)
+	default:
+		m.setStatus(fmt.Sprintf("Action %s sent for %s (preview).", label, agent), statusInfo)
+	}
+	return actionCompleteCmd(action, agent)
+}
+
+func (m *model) updateApprovalsInbox(msg tea.KeyMsg) (bool, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "A":
+		m.approvalsOpen = false
+		return true, nil
+	case "up", "k":
+		m.moveApprovalSelection(-1)
+		return true, nil
+	case "down", "j":
+		m.moveApprovalSelection(1)
+		return true, nil
+	case "y", "Y":
+		m.resolveSelectedApproval(models.ApprovalStatusApproved)
+		return true, nil
+	case "n", "N":
+		m.resolveSelectedApproval(models.ApprovalStatusDenied)
+		return true, nil
+	}
+	return false, nil
+}
+
+func (m *model) moveApprovalSelection(delta int) {
+	items, _ := m.approvalsForSelectedWorkspace()
+	if len(items) == 0 {
+		m.approvalsSelected = 0
+		return
+	}
+	idx := approvalSelectionIndex(m.approvalsSelected, len(items))
+	idx = clampInt(idx+delta, 0, len(items)-1)
+	m.approvalsSelected = idx
+}
+
+func (m *model) resolveSelectedApproval(status models.ApprovalStatus) {
+	items, wsID := m.approvalsForSelectedWorkspace()
+	if wsID == "" || len(items) == 0 {
+		m.setStatus("No approvals to update.", statusWarn)
+		return
+	}
+	idx := approvalSelectionIndex(m.approvalsSelected, len(items))
+	if idx < 0 || idx >= len(items) {
+		m.setStatus("No approval selected.", statusWarn)
+		return
+	}
+	items[idx].Status = status
+	if m.approvalsByWorkspace == nil {
+		m.approvalsByWorkspace = make(map[string][]approvalItem)
+	}
+	m.approvalsByWorkspace[wsID] = items
+
+	action := "Approved"
+	if status == models.ApprovalStatusDenied {
+		action = "Denied"
+	}
+	m.setStatus(fmt.Sprintf("%s approval %s.", action, items[idx].ID), statusInfo)
+}
+
+func (m *model) approvalsForSelectedWorkspace() ([]approvalItem, string) {
+	ws := m.selectedWorkspace()
+	if ws == nil {
+		return nil, ""
+	}
+	return m.approvalsForWorkspace(ws.ID), ws.ID
+}
+
+func (m *model) updateQueueEditor(msg tea.KeyMsg) (bool, tea.Cmd) {
+	if msg.String() == "esc" {
+		m.queueEditorOpen = false
+		m.closeQueueEdit()
+		return true, nil
+	}
+
+	state, agent := m.currentQueueEditorState()
+	switch msg.String() {
+	case "up", "k":
+		if state != nil {
+			m.moveQueueSelection(state, -1)
+		}
+		return true, nil
+	case "down", "j":
+		if state != nil {
+			m.moveQueueSelection(state, 1)
+		}
+		return true, nil
+	case "K":
+		if state != nil {
+			m.moveQueueItem(state, -1)
+		}
+		return true, nil
+	case "J":
+		if state != nil {
+			m.moveQueueItem(state, 1)
+		}
+		return true, nil
+	case "d":
+		if state != nil {
+			m.deleteQueueItem(state)
+		} else {
+			m.setStatus("No agent selected.", statusWarn)
+		}
+		return true, nil
+	case "m":
+		if state != nil {
+			m.addQueueItem(state, models.QueueItemTypeMessage, "New message")
+		} else {
+			m.setStatus("No agent selected.", statusWarn)
+		}
+		return true, nil
+	case "p":
+		if state != nil {
+			m.addQueueItem(state, models.QueueItemTypePause, "Pause 5m (manual)")
+		} else {
+			m.setStatus("No agent selected.", statusWarn)
+		}
+		return true, nil
+	case "e":
+		if state != nil {
+			m.openQueueEdit(state, agent)
+		} else {
+			m.setStatus("No agent selected.", statusWarn)
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func (m *model) updateQueueEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.closeQueueEdit()
+		return m, nil
+	case "enter":
+		m.applyQueueEdit()
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	}
+
+	switch msg.Type {
+	case tea.KeyRunes:
+		m.queueEditBuffer += string(msg.Runes)
+	case tea.KeyBackspace, tea.KeyDelete:
+		m.queueEditBuffer = trimLastRune(m.queueEditBuffer)
+	}
+	return m, nil
+}
+
+func (m *model) currentQueueEditorState() (*queueEditorState, string) {
+	card := m.selectedAgentCard()
+	if card == nil {
+		return nil, ""
+	}
+	agent := card.Name
+	state := m.ensureQueueEditorState(agent)
+	return state, agent
+}
+
+func (m *model) ensureQueueEditorState(agent string) *queueEditorState {
+	if strings.TrimSpace(agent) == "" {
+		return nil
+	}
+	if m.queueEditors == nil {
+		m.queueEditors = make(map[string]*queueEditorState)
+	}
+	state, ok := m.queueEditors[agent]
+	if !ok {
+		state = &queueEditorState{}
+		m.queueEditors[agent] = state
+	}
+	return state
+}
+
+func (m *model) openQueueEdit(state *queueEditorState, agent string) {
+	if state == nil || len(state.Items) == 0 {
+		m.setStatus("Queue is empty.", statusWarn)
+		return
+	}
+	if state.Selected < 0 || state.Selected >= len(state.Items) {
+		state.Selected = 0
+	}
+	m.queueEditOpen = true
+	m.queueEditAgent = agent
+	m.queueEditIndex = state.Selected
+	m.queueEditBuffer = state.Items[state.Selected].Summary
+}
+
+func (m *model) closeQueueEdit() {
+	m.queueEditOpen = false
+	m.queueEditAgent = ""
+	m.queueEditIndex = 0
+	m.queueEditBuffer = ""
+}
+
+func (m *model) applyQueueEdit() {
+	state := m.ensureQueueEditorState(m.queueEditAgent)
+	if state == nil || len(state.Items) == 0 {
+		m.closeQueueEdit()
+		m.setStatus("No queue item to edit.", statusWarn)
+		return
+	}
+	if m.queueEditIndex < 0 || m.queueEditIndex >= len(state.Items) {
+		m.closeQueueEdit()
+		m.setStatus("Queue selection changed; edit canceled.", statusWarn)
+		return
+	}
+	text := strings.TrimSpace(m.queueEditBuffer)
+	if text == "" {
+		m.closeQueueEdit()
+		m.setStatus("Queue edit canceled (empty).", statusWarn)
+		return
+	}
+	state.Items[m.queueEditIndex].Summary = text
+	m.closeQueueEdit()
+	m.setStatus("Queue item updated.", statusInfo)
+}
+
+func (m *model) moveQueueSelection(state *queueEditorState, delta int) {
+	if state == nil || len(state.Items) == 0 {
+		if state != nil {
+			state.Selected = 0
+		}
+		return
+	}
+	state.Selected = clampInt(state.Selected+delta, 0, len(state.Items)-1)
+}
+
+func (m *model) moveQueueItem(state *queueEditorState, delta int) {
+	if state == nil || len(state.Items) == 0 {
+		return
+	}
+	index := state.Selected
+	next := index + delta
+	if next < 0 || next >= len(state.Items) {
+		return
+	}
+	state.Items[index], state.Items[next] = state.Items[next], state.Items[index]
+	state.Selected = next
+}
+
+func (m *model) deleteQueueItem(state *queueEditorState) {
+	if state == nil || len(state.Items) == 0 {
+		return
+	}
+	index := state.Selected
+	state.Items = append(state.Items[:index], state.Items[index+1:]...)
+	if len(state.Items) == 0 {
+		state.Selected = 0
+	} else if index >= len(state.Items) {
+		state.Selected = len(state.Items) - 1
+	}
+	m.setStatus("Queue item deleted.", statusInfo)
+}
+
+func (m *model) addQueueItem(state *queueEditorState, kind models.QueueItemType, summary string) {
+	if state == nil {
+		return
+	}
+	item := queueItem{
+		ID:      nextQueueItemID(state),
+		Kind:    kind,
+		Summary: summary,
+		Status:  models.QueueItemStatusPending,
+	}
+	state.Items = append(state.Items, item)
+	state.Selected = len(state.Items) - 1
+	m.setStatus("Queue item added.", statusInfo)
+}
+
+func nextQueueItemID(state *queueEditorState) string {
+	if state == nil {
+		return "q-1"
+	}
+	return fmt.Sprintf("q-%02d", len(state.Items)+1)
+}
+
+func (m *model) openTranscriptSearch() {
+	if m.transcriptViewer == nil {
+		return
+	}
+	m.transcriptSearchOpen = true
+	m.transcriptSearchQuery = m.transcriptViewer.SearchQuery
+}
+
+func (m *model) closeTranscriptSearch() {
+	m.transcriptSearchOpen = false
+	m.transcriptSearchQuery = ""
+}
+
+func (m *model) updateTranscriptSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.closeTranscriptSearch()
+		return m, nil
+	case "enter":
+		query := strings.TrimSpace(m.transcriptSearchQuery)
+		if m.transcriptViewer != nil {
+			if query == "" {
+				m.transcriptViewer.ClearSearch()
+			} else {
+				m.transcriptViewer.SetSearch(query)
+			}
+		}
+		m.closeTranscriptSearch()
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	}
+
+	switch msg.Type {
+	case tea.KeyRunes:
+		m.transcriptSearchQuery += string(msg.Runes)
+	case tea.KeyBackspace, tea.KeyDelete:
+		m.transcriptSearchQuery = trimLastRune(m.transcriptSearchQuery)
+	}
+
+	return m, nil
 }
 
 func (m model) searchLine(target viewID) string {
@@ -1523,19 +2851,109 @@ func (m model) searchLine(target viewID) string {
 	case viewAgent:
 		query = m.agentFilter
 	}
-	if target == viewWorkspace && !(m.searchOpen && m.searchTarget == target) {
-		return ""
-	}
-	label := "Filter:"
+	activeSearch := m.searchOpen && m.searchTarget == target
+	label := "Filter"
 	style := m.styles.Muted
-	if m.searchOpen && m.searchTarget == target {
-		label = "Search:"
+	if activeSearch {
+		label = "Search"
 		style = m.styles.Info
 	}
-	if strings.TrimSpace(query) == "" && label == "Filter:" {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		if !activeSearch {
+			return ""
+		}
+		query = "..."
+	}
+	return style.Render(fmt.Sprintf("%s (%s): %s", label, viewLabel(target), query))
+}
+
+func (m model) agentSearchStatusLines() []string {
+	query := strings.TrimSpace(m.agentFilter)
+	if query == "" {
+		return nil
+	}
+	allCards := m.allAgentCards()
+	filtered := filterAgentCards(allCards, query)
+	total := len(allCards)
+	matches := len(filtered)
+	lines := []string{
+		m.styles.Muted.Render(fmt.Sprintf("Matches: %d/%d", matches, total)),
+	}
+	if matches == 0 {
+		lines = append(lines,
+			m.styles.Warning.Render("No agents match this filter."),
+			m.styles.Muted.Render("Press / to edit or clear the filter."),
+		)
+	}
+	return lines
+}
+
+func (m model) transcriptSearchLine() string {
+	if !m.showTranscript || m.transcriptViewer == nil {
 		return ""
 	}
-	return style.Render(fmt.Sprintf("%s %s", label, query))
+	query := strings.TrimSpace(m.transcriptViewer.SearchQuery)
+	if m.transcriptSearchOpen {
+		query = strings.TrimSpace(m.transcriptSearchQuery)
+		if query == "" {
+			query = "..."
+		}
+		return m.styles.Info.Render(fmt.Sprintf("Search transcript: %s", query))
+	}
+	if query == "" {
+		return ""
+	}
+	return m.styles.Muted.Render(fmt.Sprintf("Search transcript: %s", query))
+}
+
+func (m model) actionConfirmLine() string {
+	if !m.actionConfirmOpen {
+		return ""
+	}
+	label := actionLabel(m.actionConfirmAction)
+	agent := m.actionConfirmAgent
+	if label == "" {
+		label = "Action"
+	}
+	if agent == "" {
+		agent = "agent"
+	}
+	return m.styles.Warning.Render(fmt.Sprintf("Confirm %s for %s? (y/n)", strings.ToLower(label), agent))
+}
+
+func (m model) actionProgressLine() string {
+	if m.actionInFlightAction == "" {
+		return ""
+	}
+	label := actionLabel(m.actionInFlightAction)
+	if label == "" {
+		label = "Action"
+	}
+	agent := m.actionInFlightAgent
+	if agent == "" {
+		agent = "agent"
+	}
+	return m.styles.Info.Render(fmt.Sprintf("Action: %s (%s)", label, agent))
+}
+
+func actionLabel(action string) string {
+	switch action {
+	case actionInterrupt:
+		return "Interrupt"
+	case actionRestart:
+		return "Restart"
+	case actionExportLogs:
+		return "Export logs"
+	case actionPause:
+		return "Pause"
+	case actionResume:
+		return "Resume"
+	case actionView:
+		return "View"
+	default:
+		return action
+	}
 }
 
 func filterAgentCards(cards []components.AgentCard, query string) []components.AgentCard {
@@ -1552,12 +2970,16 @@ func filterAgentCards(cards []components.AgentCard, query string) []components.A
 }
 
 func agentCardHaystack(card components.AgentCard) string {
-	return strings.ToLower(strings.Join([]string{
+	fields := []string{
 		card.Name,
 		string(card.Type),
 		card.Model,
 		card.Profile,
-	}, " "))
+	}
+	if card.CooldownUntil != nil && time.Until(*card.CooldownUntil) > 0 {
+		fields = append(fields, "cooldown")
+	}
+	return strings.ToLower(strings.Join(fields, " "))
 }
 
 func matchesSearch(query, haystack string) bool {
@@ -1597,65 +3019,4 @@ func fuzzyMatch(haystack, token string) bool {
 		}
 	}
 	return false
-}
-
-func sampleTranscript() string {
-	return `$ opencode
-[info] Starting OpenCode agent...
-[info] Model: gpt-5
-[info] Workspace: /home/user/projects/api-service
-
-> Analyzing codebase structure...
-
-Found 42 files in src/
-Found 15 files in tests/
-
-> Running initial assessment...
-
-The codebase appears to be a REST API service with:
-- Express.js server setup
-- PostgreSQL database connection
-- JWT authentication middleware
-- Basic CRUD endpoints for users and products
-
-> Ready for instructions.
-
-$ What tests are failing?
-
-> Checking test results...
-
-Running: npm test
-
-` + "```" + `
-FAIL src/users.test.js
-  ✓ should create a new user (45ms)
-  ✗ should validate email format (12ms)
-    Expected: validation error
-    Received: success
-
-PASS src/products.test.js
-  ✓ should list products (23ms)
-  ✓ should filter by category (31ms)
-` + "```" + `
-
-Error: 1 test failed in users.test.js
-The email validation test expects an error but receives success.
-
-> Investigating the issue...
-
-Looking at src/validators/email.js:
-The regex pattern is missing the TLD validation.
-
-> Suggested fix:
-
-` + "```javascript" + `
-// Current (incorrect)
-const emailRegex = /^[^@]+@[^@]+$/
-
-// Fixed
-const emailRegex = /^[^@]+@[^@]+\.[a-zA-Z]{2,}$/
-` + "```" + `
-
-? Apply this fix? [y/n]
-`
 }

@@ -24,11 +24,11 @@ func stateDescriptor(styleSet styles.Styles, state models.AgentState) (string, s
 	case models.AgentStateIdle:
 		return "OK", "Idle", styleSet.StatusIdle
 	case models.AgentStateAwaitingApproval:
-		return "?", "Approval", styleSet.Warning
+		return "APP", "Approval", styleSet.Info
 	case models.AgentStateRateLimited:
-		return "!", "Rate limit", styleSet.Warning
+		return "RL", "Rate limit", styleSet.Warning
 	case models.AgentStateError:
-		return "X", "Error", styleSet.StatusError
+		return "ERR", "Error", styleSet.StatusError
 	case models.AgentStatePaused:
 		return "P", "Paused", styleSet.StatusPaused
 	case models.AgentStateStarting:

@@ -50,7 +50,10 @@ func RenderWorkspaceCard(styleSet styles.Styles, card WorkspaceCard) string {
 
 	cardStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		Padding(0, 1)
+		BorderForeground(lipgloss.Color(styleSet.Theme.Tokens.Border)).
+		Padding(0, 1).
+		Width(agentCardWidth).
+		MaxWidth(agentCardWidth)
 
 	return cardStyle.Render(content)
 }

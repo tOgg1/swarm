@@ -190,20 +190,21 @@ func (g *WorkspaceGrid) Render(styleSet styles.Styles) string {
 	filtered := g.FilteredWorkspaces()
 	if len(filtered) == 0 {
 		if g.Filter != "" {
-			return styleSet.Muted.Render(fmt.Sprintf("No workspaces matching '%s'", g.Filter))
+			return styleSet.Warning.Render(fmt.Sprintf("No workspaces match '%s'.", g.Filter)) + "\n" +
+				styleSet.Muted.Render("Press / to edit or clear the filter.")
 		}
 		return styleSet.Muted.Render("No workspaces. Use 'swarm ws create' to create one.")
 	}
 
 	// Calculate card width based on available width
-	cardWidth := 35
+	cardWidth := agentCardWidth
 	if g.Width > 0 && g.Columns > 0 {
 		cardWidth = (g.Width - (g.Columns-1)*2) / g.Columns // 2 chars gap between columns
 		if cardWidth < 25 {
 			cardWidth = 25
 		}
-		if cardWidth > 50 {
-			cardWidth = 50
+		if cardWidth > agentCardWidth {
+			cardWidth = agentCardWidth
 		}
 	}
 
@@ -278,7 +279,10 @@ func renderGridCard(styleSet styles.Styles, ws *models.Workspace, selected bool,
 	// Alert indicator
 	alertLine := ""
 	if len(ws.Alerts) > 0 {
-		alertLine = styleSet.Warning.Render(fmt.Sprintf("  ! %d alert(s)", len(ws.Alerts)))
+		token := renderAlertToken(styleSet, ws.Alerts[0])
+		alertLabel := styleSet.Muted.Render("  Alerts:")
+		alertCount := styleSet.Muted.Render(fmt.Sprintf(" %d", len(ws.Alerts)))
+		alertLine = fmt.Sprintf("%s %s%s", alertLabel, token, alertCount)
 	}
 
 	// Build card
@@ -299,19 +303,32 @@ func renderGridCard(styleSet styles.Styles, ws *models.Workspace, selected bool,
 	cardStyle := lipgloss.NewStyle().
 		Width(width).
 		Padding(0, 1).
-		Margin(0, 1, 1, 0)
+		Margin(0, 1, 1, 0).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(styleSet.Theme.Tokens.Border))
 
 	if selected {
 		cardStyle = cardStyle.
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#7D56F4")) // Accent color for selection
-	} else {
-		cardStyle = cardStyle.
-			Border(lipgloss.NormalBorder()).
-			BorderForeground(lipgloss.Color("240"))
+			BorderForeground(lipgloss.Color(styleSet.Theme.Tokens.Focus)).
+			Background(lipgloss.Color(styleSet.Theme.Tokens.Panel))
 	}
 
 	return cardStyle.Render(content)
+}
+
+func renderAlertToken(styleSet styles.Styles, alert models.Alert) string {
+	switch alert.Type {
+	case models.AlertTypeApprovalNeeded:
+		return styleSet.Info.Render("[APP]")
+	case models.AlertTypeRateLimit:
+		return styleSet.Warning.Render("[RL]")
+	case models.AlertTypeCooldown:
+		return styleSet.Warning.Render("[CD]")
+	case models.AlertTypeError:
+		return styleSet.Error.Render("[ERR]")
+	default:
+		return styleSet.Warning.Render("[!]")
+	}
 }
 
 func renderWorkspaceStatus(styleSet styles.Styles, status models.WorkspaceStatus) string {
