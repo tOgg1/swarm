@@ -299,6 +299,59 @@ func (c *Client) SendKeys(ctx context.Context, target, keys string, literal, ent
 	return nil
 }
 
+// SendInterrupt sends Ctrl+C to a tmux pane.
+func (c *Client) SendInterrupt(ctx context.Context, target string) error {
+	if strings.TrimSpace(target) == "" {
+		return fmt.Errorf("target is required")
+	}
+
+	cmd := fmt.Sprintf("tmux send-keys -t %s C-c", escapeArg(target))
+	if _, _, err := c.exec.Exec(ctx, cmd); err != nil {
+		return fmt.Errorf("tmux send-keys C-c failed: %w", err)
+	}
+
+	return nil
+}
+
+// SendAndWait sends keys to a tmux pane and waits for output to stabilize.
+// It polls capture-pane output until the hash is unchanged for stableRounds.
+func (c *Client) SendAndWait(ctx context.Context, target, keys string, literal, enter bool, stableRounds int) (string, error) {
+	if stableRounds <= 0 {
+		stableRounds = 2
+	}
+
+	if err := c.SendKeys(ctx, target, keys, literal, enter); err != nil {
+		return "", err
+	}
+
+	var lastHash string
+	stable := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+
+		content, err := c.CapturePane(ctx, target, false)
+		if err != nil {
+			return "", err
+		}
+
+		hash := HashSnapshot(content)
+		if hash == lastHash {
+			stable++
+			if stable >= stableRounds {
+				return content, nil
+			}
+		} else {
+			stable = 0
+			lastHash = hash
+		}
+	}
+}
+
 // CapturePane captures the visible content of a pane.
 // If history is true, includes scrollback history.
 func (c *Client) CapturePane(ctx context.Context, target string, history bool) (string, error) {

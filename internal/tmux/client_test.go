@@ -321,6 +321,19 @@ func TestSendKeys_WithEnter(t *testing.T) {
 	}
 }
 
+func TestSendInterrupt(t *testing.T) {
+	exec := &fakeExecutor{}
+	client := NewClient(exec)
+
+	err := client.SendInterrupt(context.Background(), "%1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !containsAll(exec.lastCmd, "send-keys", "-t", "C-c") {
+		t.Errorf("unexpected command: %s", exec.lastCmd)
+	}
+}
+
 type multiCallExecutor struct {
 	calls *int
 }
@@ -328,6 +341,43 @@ type multiCallExecutor struct {
 func (e *multiCallExecutor) Exec(ctx context.Context, cmd string) ([]byte, []byte, error) {
 	*e.calls++
 	return nil, nil, nil
+}
+
+type sequenceExecutor struct {
+	outputs [][]byte
+	index   int
+	lastCmd string
+}
+
+func (e *sequenceExecutor) Exec(ctx context.Context, cmd string) ([]byte, []byte, error) {
+	e.lastCmd = cmd
+	if e.index >= len(e.outputs) {
+		return nil, nil, nil
+	}
+	out := e.outputs[e.index]
+	e.index++
+	return out, nil, nil
+}
+
+func TestSendAndWait(t *testing.T) {
+	exec := &sequenceExecutor{
+		outputs: [][]byte{
+			[]byte("busy\n"),
+			[]byte("still busy\n"),
+			[]byte("done\n"),
+			[]byte("done\n"),
+			[]byte("done\n"),
+		},
+	}
+	client := NewClient(exec)
+
+	content, err := client.SendAndWait(context.Background(), "%1", "echo hello", true, true, 2)
+	if err != nil {
+		t.Fatalf("SendAndWait failed: %v", err)
+	}
+	if content != "done\n" {
+		t.Fatalf("unexpected content: %q", content)
+	}
 }
 
 func TestCapturePane(t *testing.T) {
