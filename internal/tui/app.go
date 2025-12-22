@@ -331,6 +331,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.view == viewAgent {
 			switch msg.String() {
+			case "enter":
+				// Drill down into agent detail view
+				if card := m.selectedAgentCard(); card != nil && !m.showTranscript {
+					m.view = viewAgentDetail
+					m.selectedView = m.view
+					m.showTranscript = true // Show transcript in detail view
+				}
+				return m, nil
 			case "/":
 				if m.showTranscript {
 					m.openTranscriptSearch()
@@ -531,6 +539,7 @@ const (
 	viewDashboard viewID = iota
 	viewWorkspace
 	viewAgent
+	viewAgentDetail // Full-screen agent detail view
 )
 
 type statusSeverity int
@@ -673,6 +682,8 @@ func (m *model) viewLines() []string {
 			lines = append(lines, "")
 		}
 		return m.renderWithInspector(lines, "Agent inspector", m.agentInspectorLines())
+	case viewAgentDetail:
+		return m.agentDetailView()
 	default:
 		return []string{m.dashboardView()}
 	}

@@ -2,10 +2,23 @@
 package tui
 
 import (
+	"strings"
 	"time"
 
 	"github.com/opencode-ai/swarm/internal/models"
 )
+
+func sampleTranscriptLines() ([]string, []time.Time) {
+	content := sampleTranscript()
+	lines := strings.Split(content, "\n")
+	now := time.Now()
+	start := now.Add(-time.Duration(len(lines)) * 8 * time.Second)
+	timestamps := make([]time.Time, len(lines))
+	for i := range lines {
+		timestamps[i] = start.Add(time.Duration(i) * 8 * time.Second)
+	}
+	return lines, timestamps
+}
 
 func sampleTranscript() string {
 	return `$ opencode

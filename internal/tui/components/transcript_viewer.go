@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -13,31 +14,56 @@ import (
 
 const defaultTranscriptMaxLines = 10000
 
+// TranscriptTimestampMode controls timestamp formatting in the transcript margin.
+type TranscriptTimestampMode int
+
+const (
+	TimestampRelative TranscriptTimestampMode = iota
+	TimestampAbsolute
+)
+
 // TranscriptViewer displays a scrollable transcript with syntax highlighting.
 type TranscriptViewer struct {
-	Lines        []string
-	ScrollOffset int
-	Height       int
-	Width        int
-	MaxLines     int
-	SearchQuery  string
-	SearchIndex  int   // Current search match index
-	searchHits   []int // Line indices that match search
+	Lines          []string
+	LineTimestamps []time.Time
+	ScrollOffset   int
+	Height         int
+	Width          int
+	MaxLines       int
+	TimestampMode  TranscriptTimestampMode
+	SearchQuery    string
+	SearchIndex    int   // Current search match index
+	searchHits     []int // Line indices that match search
 }
 
 // NewTranscriptViewer creates a new transcript viewer.
 func NewTranscriptViewer() *TranscriptViewer {
 	return &TranscriptViewer{
-		Lines:  make([]string, 0),
-		Height: 20,
-		Width:  60,
-		MaxLines: defaultTranscriptMaxLines,
+		Lines:         make([]string, 0),
+		Height:        20,
+		Width:         60,
+		MaxLines:      defaultTranscriptMaxLines,
+		TimestampMode: TimestampRelative,
 	}
 }
 
 // SetLines sets the transcript content.
 func (v *TranscriptViewer) SetLines(lines []string) {
 	v.Lines = lines
+	v.LineTimestamps = nil
+	v.applyMaxLines()
+	v.clampScroll()
+	v.updateSearchHits()
+}
+
+// SetLinesWithTimestamps sets the transcript content and timestamps.
+func (v *TranscriptViewer) SetLinesWithTimestamps(lines []string, timestamps []time.Time) {
+	v.Lines = lines
+	if len(timestamps) == len(lines) {
+		v.LineTimestamps = append([]time.Time(nil), timestamps...)
+	} else {
+		v.LineTimestamps = nil
+	}
 	v.applyMaxLines()
 	v.clampScroll()
 	v.updateSearchHits()
@@ -50,6 +76,7 @@ func (v *TranscriptViewer) SetContent(content string) {
 	} else {
 		v.Lines = strings.Split(content, "\n")
 	}
+	v.LineTimestamps = nil
 	v.applyMaxLines()
 	v.clampScroll()
 	v.updateSearchHits()
@@ -64,6 +91,11 @@ func (v *TranscriptViewer) SetMaxLines(maxLines int) {
 	v.applyMaxLines()
 	v.clampScroll()
 	v.updateSearchHits()
+}
+
+// SetTimestampMode controls how timestamps are rendered.
+func (v *TranscriptViewer) SetTimestampMode(mode TranscriptTimestampMode) {
+	v.TimestampMode = mode
 }
 
 // ScrollUp scrolls the view up by n lines.
@@ -179,10 +211,16 @@ func (v *TranscriptViewer) clampScroll() {
 }
 
 func (v *TranscriptViewer) applyMaxLines() {
-	if v.MaxLines <= 0 || len(v.Lines) <= v.MaxLines {
+	lineCount := len(v.Lines)
+	if v.MaxLines <= 0 || lineCount <= v.MaxLines {
 		return
 	}
-	trimmed := len(v.Lines) - v.MaxLines
+	trimmed := lineCount - v.MaxLines
+	if len(v.LineTimestamps) == lineCount {
+		v.LineTimestamps = append([]time.Time(nil), v.LineTimestamps[trimmed:]...)
+	} else if len(v.LineTimestamps) > 0 {
+		v.LineTimestamps = nil
+	}
 	v.Lines = append([]string(nil), v.Lines[trimmed:]...)
 	if v.ScrollOffset >= trimmed {
 		v.ScrollOffset -= trimmed
@@ -206,6 +244,18 @@ func (v *TranscriptViewer) Render(styleSet styles.Styles) string {
 	// Build visible lines
 	var rendered []string
 	lineNumWidth := len(fmt.Sprintf("%d", len(v.Lines)))
+	hasTimestamps := len(v.LineTimestamps) == len(v.Lines)
+	timestampWidth := 0
+	now := time.Time{}
+	if hasTimestamps {
+		now = time.Now()
+		for i := v.ScrollOffset; i < endIdx; i++ {
+			formatted := v.formatTimestamp(v.LineTimestamps[i], now)
+			if len(formatted) > timestampWidth {
+				timestampWidth = len(formatted)
+			}
+		}
+	}
 
 	for i := v.ScrollOffset; i < endIdx; i++ {
 		line := v.Lines[i]
@@ -235,7 +285,19 @@ func (v *TranscriptViewer) Render(styleSet styles.Styles) string {
 		if isCurrentHit {
 			lineNumStyle = styleSet.Accent
 		}
-		renderedLine := fmt.Sprintf("%s │ %s", lineNumStyle.Render(lineNum), styledLine)
+		var renderedLine string
+		if hasTimestamps {
+			timestamp := v.formatTimestamp(v.LineTimestamps[i], now)
+			timestampCol := fmt.Sprintf("%*s", timestampWidth, timestamp)
+			renderedLine = fmt.Sprintf(
+				"%s │ %s │ %s",
+				styleSet.Muted.Render(timestampCol),
+				lineNumStyle.Render(lineNum),
+				styledLine,
+			)
+		} else {
+			renderedLine = fmt.Sprintf("%s │ %s", lineNumStyle.Render(lineNum), styledLine)
+		}
 
 		// Truncate if too wide
 		if v.Width > 0 && lipgloss.Width(renderedLine) > v.Width {
@@ -339,6 +401,39 @@ func (v *TranscriptViewer) highlightSearchMatch(styleSet styles.Styles, line str
 	}
 
 	return styleSet.Text.Render(before) + matchStyle.Render(match) + styleSet.Text.Render(after)
+}
+
+func (v *TranscriptViewer) formatTimestamp(ts time.Time, now time.Time) string {
+	if ts.IsZero() {
+		return ""
+	}
+	switch v.TimestampMode {
+	case TimestampAbsolute:
+		return ts.Format("15:04:05")
+	default:
+		return formatRelativeTimestamp(ts, now)
+	}
+}
+
+func formatRelativeTimestamp(ts time.Time, now time.Time) string {
+	if ts.IsZero() {
+		return ""
+	}
+	delta := now.Sub(ts)
+	if delta < 0 {
+		delta = 0
+	}
+	if delta < time.Minute {
+		return fmt.Sprintf("%ds ago", int(delta.Seconds()))
+	}
+	if delta < time.Hour {
+		return fmt.Sprintf("%dm ago", int(delta.Minutes()))
+	}
+	if delta < 24*time.Hour {
+		return fmt.Sprintf("%dh ago", int(delta.Hours()))
+	}
+	days := int(delta.Hours() / 24)
+	return fmt.Sprintf("%dd ago", days)
 }
 
 func truncateString(s string, maxLen int) string {
