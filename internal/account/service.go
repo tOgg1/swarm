@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -570,8 +571,84 @@ func ResolveCredential(credentialRef string) (string, error) {
 		return strings.TrimSpace(string(data)), nil
 	}
 
+	// Check for caam: prefix (coding_agent_account_manager vault)
+	if strings.HasPrefix(credentialRef, "caam:") {
+		return resolveCaamCredential(strings.TrimPrefix(credentialRef, "caam:"))
+	}
+
 	// Treat as literal value (for backwards compatibility)
 	return credentialRef, nil
+}
+
+// resolveCaamCredential resolves a credential from a caam vault.
+// The ref format is "provider/email", e.g., "claude/user@example.com".
+func resolveCaamCredential(ref string) (string, error) {
+	parts := strings.SplitN(ref, "/", 2)
+	if len(parts) != 2 {
+		return "", errors.New("invalid caam credential reference format: expected provider/email")
+	}
+	provider := parts[0]
+	email := parts[1]
+
+	// Get caam vault path
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", errors.New("failed to determine home directory: " + err.Error())
+	}
+	vaultPath := filepath.Join(home, ".local", "share", "caam", "vault")
+	profilePath := filepath.Join(vaultPath, provider, email)
+
+	// Check if profile exists
+	info, err := os.Stat(profilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", errors.New("caam profile not found: " + ref)
+		}
+		return "", errors.New("failed to access caam profile: " + err.Error())
+	}
+	if !info.IsDir() {
+		return "", errors.New("caam profile path is not a directory: " + ref)
+	}
+
+	// Try to read auth files based on provider
+	var authFile string
+	switch strings.ToLower(provider) {
+	case "claude":
+		// Claude uses auth.json or .claude.json
+		authFile = filepath.Join(profilePath, "auth.json")
+		if _, err := os.Stat(authFile); os.IsNotExist(err) {
+			authFile = filepath.Join(profilePath, ".claude.json")
+		}
+	case "codex":
+		authFile = filepath.Join(profilePath, "auth.json")
+	case "gemini":
+		authFile = filepath.Join(profilePath, "settings.json")
+	default:
+		// Unknown provider - try auth.json
+		authFile = filepath.Join(profilePath, "auth.json")
+	}
+
+	data, err := os.ReadFile(authFile)
+	if err != nil {
+		return "", errors.New("failed to read caam auth file: " + err.Error())
+	}
+
+	// Parse JSON to extract API key/token
+	var authData map[string]interface{}
+	if err := json.Unmarshal(data, &authData); err != nil {
+		return "", errors.New("failed to parse caam auth file: " + err.Error())
+	}
+
+	// Look for common credential field names
+	for _, key := range []string{"api_key", "apiKey", "token", "accessToken", "access_token", "key"} {
+		if val, ok := authData[key]; ok {
+			if s, ok := val.(string); ok && s != "" {
+				return s, nil
+			}
+		}
+	}
+
+	return "", errors.New("no API key found in caam auth file")
 }
 
 func (s *Service) publishRateLimitEvent(ctx context.Context, account *models.Account, duration time.Duration, reason string) {

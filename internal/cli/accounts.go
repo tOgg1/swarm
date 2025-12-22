@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/opencode-ai/swarm/internal/account"
+	"github.com/opencode-ai/swarm/internal/account/caam"
 	"github.com/opencode-ai/swarm/internal/agent"
 	"github.com/opencode-ai/swarm/internal/config"
 	"github.com/opencode-ai/swarm/internal/db"
@@ -39,6 +40,11 @@ var (
 	accountsAddEnvVar        string
 	accountsAddSkipTest      bool
 	accountsAddForce         bool
+
+	// accounts import-caam flags
+	accountsImportCaamPath     string
+	accountsImportCaamProvider string
+	accountsImportCaamDryRun   bool
 )
 
 func init() {
@@ -47,6 +53,7 @@ func init() {
 	accountsCmd.AddCommand(accountsAddCmd)
 	accountsCmd.AddCommand(accountsCooldownCmd)
 	accountsCmd.AddCommand(accountsRotateCmd)
+	accountsCmd.AddCommand(accountsImportCaamCmd)
 
 	accountsCooldownCmd.AddCommand(accountsCooldownListCmd)
 	accountsCooldownCmd.AddCommand(accountsCooldownSetCmd)
@@ -65,6 +72,11 @@ func init() {
 	accountsAddCmd.Flags().StringVar(&accountsAddEnvVar, "env-var", "", "environment variable containing the credential")
 	accountsAddCmd.Flags().BoolVar(&accountsAddSkipTest, "skip-test", false, "skip credential validation")
 	accountsAddCmd.Flags().BoolVar(&accountsAddForce, "force", false, "overwrite stored credential file if it exists")
+
+	// accounts import-caam flags
+	accountsImportCaamCmd.Flags().StringVar(&accountsImportCaamPath, "path", "", "path to caam vault directory")
+	accountsImportCaamCmd.Flags().StringVar(&accountsImportCaamProvider, "provider", "", "filter by provider (claude, codex, gemini)")
+	accountsImportCaamCmd.Flags().BoolVar(&accountsImportCaamDryRun, "dry-run", false, "show what would be imported without making changes")
 }
 
 var accountsCmd = &cobra.Command{
@@ -157,6 +169,198 @@ var accountsAddCmd = &cobra.Command{
 		fmt.Fprintf(os.Stdout, "Account %q created successfully (ID: %s)\n", profile, created.ID)
 		return nil
 	},
+}
+
+var accountsImportCaamCmd = &cobra.Command{
+	Use:   "import-caam",
+	Short: "Import accounts from caam vault",
+	Long: `Import accounts from a coding_agent_account_manager (caam) vault.
+
+The caam vault stores account profiles for various AI coding assistants
+(Claude, Codex, Gemini) in a standard directory structure.
+
+By default, looks for the vault at ~/.local/share/caam/vault.
+Use --path to specify a different location.
+
+Credential references are created using the caam: prefix, which allows
+Swarm to resolve credentials from the caam vault at runtime.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := context.Background()
+		reader := bufio.NewReader(os.Stdin)
+
+		// Determine vault path
+		vaultPath := accountsImportCaamPath
+		if vaultPath == "" {
+			vaultPath = caam.DefaultVaultPath()
+		}
+
+		// Parse the vault
+		vault, err := caam.ParseVault(vaultPath)
+		if err != nil {
+			return fmt.Errorf("failed to parse caam vault: %w", err)
+		}
+
+		// Filter by provider if specified
+		var profiles []*caam.Profile
+		if accountsImportCaamProvider != "" {
+			profiles = vault.GetProfilesByProvider(accountsImportCaamProvider)
+		} else {
+			profiles = vault.Profiles
+		}
+
+		// Filter to valid profiles only
+		var validProfiles []*caam.Profile
+		for _, p := range profiles {
+			if p.IsValid() {
+				validProfiles = append(validProfiles, p)
+			}
+		}
+
+		if len(validProfiles) == 0 {
+			fmt.Fprintln(os.Stdout, "No valid profiles found in caam vault.")
+			return nil
+		}
+
+		// Dry run - just show what would be imported
+		if accountsImportCaamDryRun {
+			return showCaamImportPreview(validProfiles)
+		}
+
+		// Open database
+		database, err := openDatabase()
+		if err != nil {
+			return err
+		}
+		defer database.Close()
+
+		repo := db.NewAccountRepository(database)
+
+		// Import each profile
+		var imported, skipped, failed int
+		var results []CaamImportResult
+
+		for _, profile := range validProfiles {
+			account := profile.ToSwarmAccount()
+
+			// Check if already exists
+			existing, _ := findAccountByProfile(ctx, repo, account.Provider, account.ProfileName)
+			if existing != nil {
+				skipped++
+				results = append(results, CaamImportResult{
+					Provider:    string(account.Provider),
+					ProfileName: account.ProfileName,
+					Status:      "skipped",
+					Reason:      "already exists",
+				})
+				continue
+			}
+
+			// Confirm import if interactive
+			if IsInteractive() && !IsJSONOutput() && !IsJSONLOutput() {
+				confirm, err := promptConfirm(reader, fmt.Sprintf("Import %s/%s? [y/N]: ", profile.Provider, profile.Email))
+				if err != nil {
+					return err
+				}
+				if !confirm {
+					skipped++
+					results = append(results, CaamImportResult{
+						Provider:    string(account.Provider),
+						ProfileName: account.ProfileName,
+						Status:      "skipped",
+						Reason:      "user declined",
+					})
+					continue
+				}
+			}
+
+			// Create the account
+			if err := repo.Create(ctx, account); err != nil {
+				failed++
+				results = append(results, CaamImportResult{
+					Provider:    string(account.Provider),
+					ProfileName: account.ProfileName,
+					Status:      "failed",
+					Reason:      err.Error(),
+				})
+				continue
+			}
+
+			imported++
+			results = append(results, CaamImportResult{
+				Provider:    string(account.Provider),
+				ProfileName: account.ProfileName,
+				Status:      "imported",
+			})
+		}
+
+		// Output results
+		if IsJSONOutput() || IsJSONLOutput() {
+			return WriteOutput(os.Stdout, CaamImportSummary{
+				VaultPath: vaultPath,
+				Imported:  imported,
+				Skipped:   skipped,
+				Failed:    failed,
+				Results:   results,
+			})
+		}
+
+		fmt.Fprintf(os.Stdout, "Import complete: %d imported, %d skipped, %d failed\n", imported, skipped, failed)
+		return nil
+	},
+}
+
+// CaamImportResult represents the result of importing a single profile.
+type CaamImportResult struct {
+	Provider    string `json:"provider"`
+	ProfileName string `json:"profile_name"`
+	Status      string `json:"status"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+// CaamImportSummary represents the summary of a caam import operation.
+type CaamImportSummary struct {
+	VaultPath string             `json:"vault_path"`
+	Imported  int                `json:"imported"`
+	Skipped   int                `json:"skipped"`
+	Failed    int                `json:"failed"`
+	Results   []CaamImportResult `json:"results"`
+}
+
+// showCaamImportPreview displays what would be imported without making changes.
+func showCaamImportPreview(profiles []*caam.Profile) error {
+	if IsJSONOutput() || IsJSONLOutput() {
+		var previews []map[string]string
+		for _, p := range profiles {
+			previews = append(previews, map[string]string{
+				"provider":       p.Provider,
+				"email":          p.Email,
+				"swarm_provider": string(p.ToSwarmAccount().Provider),
+				"credential_ref": p.ToSwarmAccount().CredentialRef,
+			})
+		}
+		return WriteOutput(os.Stdout, previews)
+	}
+
+	fmt.Fprintln(os.Stdout, "Profiles that would be imported:")
+	fmt.Fprintln(os.Stdout)
+
+	writer := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
+	fmt.Fprintln(writer, "CAAM PROVIDER\tEMAIL\tSWARM PROVIDER\tCREDENTIAL REF")
+	for _, p := range profiles {
+		account := p.ToSwarmAccount()
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n",
+			p.Provider,
+			p.Email,
+			account.Provider,
+			account.CredentialRef,
+		)
+	}
+	writer.Flush()
+
+	fmt.Fprintln(os.Stdout)
+	fmt.Fprintf(os.Stdout, "Total: %d profiles\n", len(profiles))
+	fmt.Fprintln(os.Stdout, "Run without --dry-run to import.")
+	return nil
 }
 
 // getAccountProvider prompts for or returns the provider.
