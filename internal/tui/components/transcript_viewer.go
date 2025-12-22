@@ -11,12 +11,15 @@ import (
 	"github.com/opencode-ai/swarm/internal/tui/styles"
 )
 
+const defaultTranscriptMaxLines = 10000
+
 // TranscriptViewer displays a scrollable transcript with syntax highlighting.
 type TranscriptViewer struct {
 	Lines        []string
 	ScrollOffset int
 	Height       int
 	Width        int
+	MaxLines     int
 	SearchQuery  string
 	SearchIndex  int   // Current search match index
 	searchHits   []int // Line indices that match search
@@ -28,12 +31,14 @@ func NewTranscriptViewer() *TranscriptViewer {
 		Lines:  make([]string, 0),
 		Height: 20,
 		Width:  60,
+		MaxLines: defaultTranscriptMaxLines,
 	}
 }
 
 // SetLines sets the transcript content.
 func (v *TranscriptViewer) SetLines(lines []string) {
 	v.Lines = lines
+	v.applyMaxLines()
 	v.clampScroll()
 	v.updateSearchHits()
 }
@@ -45,6 +50,18 @@ func (v *TranscriptViewer) SetContent(content string) {
 	} else {
 		v.Lines = strings.Split(content, "\n")
 	}
+	v.applyMaxLines()
+	v.clampScroll()
+	v.updateSearchHits()
+}
+
+// SetMaxLines sets the max line retention for large transcripts.
+func (v *TranscriptViewer) SetMaxLines(maxLines int) {
+	if maxLines <= 0 {
+		maxLines = defaultTranscriptMaxLines
+	}
+	v.MaxLines = maxLines
+	v.applyMaxLines()
 	v.clampScroll()
 	v.updateSearchHits()
 }
@@ -157,6 +174,19 @@ func (v *TranscriptViewer) clampScroll() {
 		v.ScrollOffset = maxOffset
 	}
 	if v.ScrollOffset < 0 {
+		v.ScrollOffset = 0
+	}
+}
+
+func (v *TranscriptViewer) applyMaxLines() {
+	if v.MaxLines <= 0 || len(v.Lines) <= v.MaxLines {
+		return
+	}
+	trimmed := len(v.Lines) - v.MaxLines
+	v.Lines = append([]string(nil), v.Lines[trimmed:]...)
+	if v.ScrollOffset >= trimmed {
+		v.ScrollOffset -= trimmed
+	} else {
 		v.ScrollOffset = 0
 	}
 }
