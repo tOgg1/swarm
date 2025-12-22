@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -121,6 +122,35 @@ func (m *mockQueueService) InsertAt(ctx context.Context, agentID string, positio
 }
 
 func (m *mockQueueService) Remove(ctx context.Context, itemID string) error {
+	return nil
+}
+
+func (m *mockQueueService) UpdateStatus(ctx context.Context, itemID string, status models.QueueItemStatus, errorMsg string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, items := range m.queues {
+		for _, item := range items {
+			if item != nil && item.ID == itemID {
+				item.Status = status
+				item.Error = errorMsg
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
+func (m *mockQueueService) UpdateAttempts(ctx context.Context, itemID string, attempts int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, items := range m.queues {
+		for _, item := range items {
+			if item != nil && item.ID == itemID {
+				item.Attempts = attempts
+				return nil
+			}
+		}
+	}
 	return nil
 }
 
@@ -719,6 +749,61 @@ func TestDispatchEvent_Fields(t *testing.T) {
 	}
 }
 
+func TestScheduler_HandleDispatchFailure_Retry(t *testing.T) {
+	queueSvc := newMockQueueService()
+	agentID := "agent-1"
+	item := createMessageItem("item-1", "hello")
+	if err := queueSvc.Enqueue(context.Background(), agentID, item); err != nil {
+		t.Fatalf("failed to enqueue item: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.MaxRetries = 2
+	cfg.RetryBackoff = time.Second
+	sched := New(cfg, nil, queueSvc, nil, nil)
+
+	if err := sched.handleDispatchFailure(context.Background(), agentID, item, fmt.Errorf("dispatch error")); err != nil {
+		t.Fatalf("handleDispatchFailure failed: %v", err)
+	}
+	if item.Attempts != 1 {
+		t.Fatalf("expected attempts 1, got %d", item.Attempts)
+	}
+	if item.Status != models.QueueItemStatusPending {
+		t.Fatalf("expected pending status, got %q", item.Status)
+	}
+	if !sched.isRetryBackoffActive(agentID) {
+		t.Fatalf("expected retry backoff to be active")
+	}
+}
+
+func TestScheduler_HandleDispatchFailure_ExceedsMax(t *testing.T) {
+	queueSvc := newMockQueueService()
+	agentID := "agent-1"
+	item := createMessageItem("item-1", "hello")
+	item.Attempts = 2
+	if err := queueSvc.Enqueue(context.Background(), agentID, item); err != nil {
+		t.Fatalf("failed to enqueue item: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.MaxRetries = 2
+	cfg.RetryBackoff = time.Second
+	sched := New(cfg, nil, queueSvc, nil, nil)
+
+	if err := sched.handleDispatchFailure(context.Background(), agentID, item, fmt.Errorf("dispatch error")); err != nil {
+		t.Fatalf("handleDispatchFailure failed: %v", err)
+	}
+	if item.Attempts != 3 {
+		t.Fatalf("expected attempts 3, got %d", item.Attempts)
+	}
+	if item.Status != models.QueueItemStatusFailed {
+		t.Fatalf("expected failed status, got %q", item.Status)
+	}
+	if sched.isRetryBackoffActive(agentID) {
+		t.Fatalf("expected retry backoff to be cleared")
+	}
+}
+
 func TestSchedulerStats_Fields(t *testing.T) {
 	now := time.Now()
 	stats := SchedulerStats{
@@ -755,6 +840,55 @@ func TestSchedulerStats_Fields(t *testing.T) {
 	}
 }
 
+func TestRetryAfterFromEvidence(t *testing.T) {
+	duration := retryAfterFromEvidence([]string{"retry_after=45s"})
+	if duration != 45*time.Second {
+		t.Fatalf("expected 45s, got %v", duration)
+	}
+}
+
+func TestRateLimitPauseDurationFallback(t *testing.T) {
+	cfg := Config{DefaultCooldownDuration: 2 * time.Minute}
+	sched := New(cfg, nil, nil, nil, nil)
+
+	duration := sched.rateLimitPauseDuration(models.StateInfo{})
+	if duration != 2*time.Minute {
+		t.Fatalf("expected 2m, got %v", duration)
+	}
+}
+
+func TestEnqueueCooldownPause(t *testing.T) {
+	queueSvc := newMockQueueService()
+	sched := New(DefaultConfig(), nil, queueSvc, nil, nil)
+
+	info := models.StateInfo{Reason: "rate limit detected"}
+	if err := sched.enqueueCooldownPause(context.Background(), "agent-1", 90*time.Second, info); err != nil {
+		t.Fatalf("enqueueCooldownPause failed: %v", err)
+	}
+
+	items, err := queueSvc.List(context.Background(), "agent-1")
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].Type != models.QueueItemTypePause {
+		t.Fatalf("expected pause item, got %q", items[0].Type)
+	}
+
+	var payload models.PausePayload
+	if err := json.Unmarshal(items[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.DurationSeconds != 90 {
+		t.Fatalf("expected duration 90s, got %d", payload.DurationSeconds)
+	}
+	if payload.Reason == "" {
+		t.Fatalf("expected reason to be set")
+	}
+}
+
 func TestConfig_Fields(t *testing.T) {
 	cfg := Config{
 		TickInterval:            2 * time.Second,
@@ -782,69 +916,88 @@ func TestConfig_Fields(t *testing.T) {
 }
 
 func TestScheduler_EvaluateCondition_WhenIdle(t *testing.T) {
-	// This is a unit test for evaluateCondition
-	// Without agent service, this will panic (nil pointer), which is expected
-	// In production, the scheduler guards against this in the dispatch flow
-	sched := New(DefaultConfig(), nil, nil, nil, nil)
+	// Test using the ConditionEvaluator directly
+	evaluator := NewConditionEvaluator()
 
 	payload := models.ConditionalPayload{
 		ConditionType: models.ConditionTypeWhenIdle,
 		Message:       "test",
 	}
 
-	// Test should recover from panic when agent service is nil
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic without agent service")
-		}
-	}()
+	// With nil agent context, condition should not be met
+	condCtx := ConditionContext{Agent: nil}
+	result, err := evaluator.Evaluate(context.Background(), condCtx, payload)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if result.Met {
+		t.Error("expected condition to not be met with nil agent")
+	}
 
-	_, _ = sched.evaluateCondition(context.Background(), "agent-1", payload)
+	// With idle agent, condition should be met
+	condCtx = ConditionContext{Agent: &models.Agent{State: models.AgentStateIdle}}
+	result, err = evaluator.Evaluate(context.Background(), condCtx, payload)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !result.Met {
+		t.Error("expected condition to be met with idle agent")
+	}
 }
 
 func TestScheduler_EvaluateCondition_AfterPrevious(t *testing.T) {
-	sched := New(DefaultConfig(), nil, nil, nil, nil)
+	evaluator := NewConditionEvaluator()
 
 	payload := models.ConditionalPayload{
 		ConditionType: models.ConditionTypeAfterPrevious,
 		Message:       "test",
 	}
 
+	condCtx := ConditionContext{Agent: &models.Agent{State: models.AgentStateIdle}}
+
 	// AfterPrevious should always return true
-	met, err := sched.evaluateCondition(context.Background(), "agent-1", payload)
+	result, err := evaluator.Evaluate(context.Background(), condCtx, payload)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	if !met {
+	if !result.Met {
 		t.Error("expected condition to be met")
 	}
 }
 
 func TestScheduler_EvaluateCondition_Custom(t *testing.T) {
-	sched := New(DefaultConfig(), nil, nil, nil, nil)
+	evaluator := NewConditionEvaluator()
 
+	// Test valid custom expression (state == idle)
 	payload := models.ConditionalPayload{
 		ConditionType: models.ConditionTypeCustomExpression,
-		Expression:    "some expression",
+		Expression:    "state == idle",
 		Message:       "test",
 	}
 
-	// Custom expressions are not implemented
-	_, err := sched.evaluateCondition(context.Background(), "agent-1", payload)
-	if err == nil {
-		t.Error("expected error for custom expression")
+	condCtx := ConditionContext{Agent: &models.Agent{State: models.AgentStateIdle}}
+
+	// Custom expressions are now implemented
+	result, err := evaluator.Evaluate(context.Background(), condCtx, payload)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !result.Met {
+		t.Error("expected condition to be met for state == idle")
 	}
 }
 
 func TestScheduler_EvaluateCondition_UnknownType(t *testing.T) {
-	sched := New(DefaultConfig(), nil, nil, nil, nil)
+	evaluator := NewConditionEvaluator()
 
 	payload := models.ConditionalPayload{
 		ConditionType: "unknown",
 		Message:       "test",
 	}
 
-	_, err := sched.evaluateCondition(context.Background(), "agent-1", payload)
+	condCtx := ConditionContext{Agent: &models.Agent{State: models.AgentStateIdle}}
+
+	_, err := evaluator.Evaluate(context.Background(), condCtx, payload)
 	if err == nil {
 		t.Error("expected error for unknown condition type")
 	}

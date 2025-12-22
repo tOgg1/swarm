@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,6 +53,18 @@ type Config struct {
 	// AutoResumeEnabled enables automatic resume of paused agents.
 	// Default: true.
 	AutoResumeEnabled bool
+
+	// MaxRetries is the maximum number of dispatch retries.
+	// Default: 3.
+	MaxRetries int
+
+	// RetryBackoff is the base backoff duration for retries.
+	// Default: 5 seconds.
+	RetryBackoff time.Duration
+
+	// DefaultCooldownDuration is the default pause duration after rate limiting.
+	// Default: 5 minutes.
+	DefaultCooldownDuration time.Duration
 }
 
 // DefaultConfig returns sensible default configuration.
@@ -61,6 +75,9 @@ func DefaultConfig() Config {
 		MaxConcurrentDispatches: 10,
 		IdleStateRequired:       true,
 		AutoResumeEnabled:       true,
+		MaxRetries:              3,
+		RetryBackoff:            5 * time.Second,
+		DefaultCooldownDuration: 5 * time.Minute,
 	}
 }
 
@@ -134,6 +151,7 @@ type Scheduler struct {
 	dispatchSem  chan struct{}
 	scheduleNow  chan string // channel to trigger immediate dispatch for an agent
 	pausedAgents map[string]struct{}
+	retryAfter   map[string]time.Time
 
 	// Stats
 	stats      SchedulerStats
@@ -152,6 +170,15 @@ func New(config Config, agentService *agent.Service, queueService queue.QueueSer
 	if config.MaxConcurrentDispatches <= 0 {
 		config.MaxConcurrentDispatches = DefaultConfig().MaxConcurrentDispatches
 	}
+	if config.MaxRetries < 0 {
+		config.MaxRetries = 0
+	}
+	if config.RetryBackoff <= 0 {
+		config.RetryBackoff = DefaultConfig().RetryBackoff
+	}
+	if config.DefaultCooldownDuration <= 0 {
+		config.DefaultCooldownDuration = DefaultConfig().DefaultCooldownDuration
+	}
 
 	return &Scheduler{
 		config:         config,
@@ -163,6 +190,7 @@ func New(config Config, agentService *agent.Service, queueService queue.QueueSer
 		dispatchSem:    make(chan struct{}, config.MaxConcurrentDispatches),
 		scheduleNow:    make(chan string, 100),
 		pausedAgents:   make(map[string]struct{}),
+		retryAfter:     make(map[string]time.Time),
 		dispatchCh:     make(chan DispatchEvent, 100),
 	}
 }
@@ -343,6 +371,34 @@ func (s *Scheduler) IsAgentPaused(agentID string) bool {
 	return paused
 }
 
+func (s *Scheduler) setRetryAfter(agentID string, until time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retryAfter[agentID] = until
+}
+
+func (s *Scheduler) clearRetryAfter(agentID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.retryAfter, agentID)
+}
+
+func (s *Scheduler) isRetryBackoffActive(agentID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	until, ok := s.retryAfter[agentID]
+	if !ok {
+		return false
+	}
+	if time.Now().UTC().Before(until) {
+		return true
+	}
+
+	delete(s.retryAfter, agentID)
+	return false
+}
+
 // Stats returns current scheduler statistics.
 func (s *Scheduler) Stats() SchedulerStats {
 	s.statsMu.RLock()
@@ -444,6 +500,9 @@ func (s *Scheduler) checkAutoResume(ctx context.Context, agents []*models.Agent)
 func (s *Scheduler) isEligibleForDispatch(a *models.Agent) bool {
 	// Check if agent is paused in scheduler
 	if s.IsAgentPaused(a.ID) {
+		return false
+	}
+	if s.isRetryBackoffActive(a.ID) {
 		return false
 	}
 
@@ -554,13 +613,31 @@ func (s *Scheduler) dispatchToAgent(agentID string) {
 				return
 			}
 
+			if s.agentService == nil {
+				s.logger.Warn().
+					Str("agent_id", agentID).
+					Str("account_id", agentInfo.AccountID).
+					Msg("agent service unavailable; cannot restart with rotated account")
+				return
+			}
+
+			fromAccount := agentInfo.AccountID
+			if _, err := s.agentService.RestartAgentWithAccount(ctx, agentID, rotated.ID); err != nil {
+				s.logger.Warn().
+					Err(err).
+					Str("agent_id", agentID).
+					Str("from_account", fromAccount).
+					Str("to_account", rotated.ID).
+					Msg("failed to restart agent with rotated account")
+				return
+			}
+
+			agentInfo.AccountID = rotated.ID
 			s.logger.Info().
 				Str("agent_id", agentID).
-				Str("from_account", agentInfo.AccountID).
+				Str("from_account", fromAccount).
 				Str("to_account", rotated.ID).
-				Msg("rotated to available account")
-			// Note: The agent service would need to be updated to use the rotated account
-			// For now, we just log and continue with the dispatch
+				Msg("rotated to available account and restarted agent")
 		}
 	}
 
@@ -610,8 +687,16 @@ func (s *Scheduler) dispatchToAgent(agentID string) {
 			Str("item_id", item.ID).
 			Str("item_type", string(item.Type)).
 			Msg("dispatch failed")
+		if retryErr := s.handleDispatchFailure(context.Background(), agentID, item, err); retryErr != nil {
+			s.logger.Warn().
+				Err(retryErr).
+				Str("agent_id", agentID).
+				Str("item_id", item.ID).
+				Msg("failed to schedule dispatch retry")
+		}
 	} else {
 		event.Success = true
+		s.clearRetryAfter(agentID)
 		s.logger.Info().
 			Str("agent_id", agentID).
 			Str("item_id", item.ID).
@@ -664,6 +749,10 @@ func (s *Scheduler) dispatchPause(ctx context.Context, agentID string, item *mod
 	return nil
 }
 
+// MaxConditionalEvaluations is the maximum number of times a conditional item
+// can be re-evaluated before being skipped.
+const MaxConditionalEvaluations = 100
+
 // dispatchConditional handles conditional dispatch.
 func (s *Scheduler) dispatchConditional(ctx context.Context, agentID string, item *models.QueueItem) error {
 	var payload models.ConditionalPayload
@@ -671,20 +760,71 @@ func (s *Scheduler) dispatchConditional(ctx context.Context, agentID string, ite
 		return fmt.Errorf("failed to unmarshal conditional payload: %w", err)
 	}
 
-	// Check the condition
-	conditionMet, err := s.evaluateCondition(ctx, agentID, payload)
+	// Check evaluation count to prevent infinite loops
+	if item.EvaluationCount >= MaxConditionalEvaluations {
+		s.logger.Warn().
+			Str("agent_id", agentID).
+			Str("item_id", item.ID).
+			Int("evaluation_count", item.EvaluationCount).
+			Msg("conditional item exceeded max evaluations, skipping")
+
+		// Mark as skipped
+		if err := s.queueService.UpdateStatus(ctx, item.ID, models.QueueItemStatusSkipped, "max evaluations exceeded"); err != nil {
+			s.logger.Warn().Err(err).Str("item_id", item.ID).Msg("failed to mark conditional as skipped")
+		}
+		return nil
+	}
+
+	// Build condition context
+	agentInfo, err := s.agentService.GetAgent(ctx, agentID)
 	if err != nil {
+		return fmt.Errorf("failed to get agent: %w", err)
+	}
+
+	condCtx := ConditionContext{
+		Agent:       agentInfo,
+		QueueLength: agentInfo.QueueLength,
+		Now:         time.Now().UTC(),
+	}
+
+	// Evaluate the condition using the new evaluator
+	evaluator := NewConditionEvaluator()
+	result, err := evaluator.Evaluate(ctx, condCtx, payload)
+	if err != nil {
+		s.logger.Warn().
+			Err(err).
+			Str("agent_id", agentID).
+			Str("condition_type", string(payload.ConditionType)).
+			Str("expression", payload.Expression).
+			Msg("condition evaluation error")
 		return fmt.Errorf("failed to evaluate condition: %w", err)
 	}
 
-	if !conditionMet {
+	if !result.Met {
+		// Increment evaluation count and re-queue
+		item.EvaluationCount++
+
+		s.logger.Debug().
+			Str("agent_id", agentID).
+			Str("item_id", item.ID).
+			Str("condition_type", string(payload.ConditionType)).
+			Str("reason", result.Reason).
+			Int("evaluation_count", item.EvaluationCount).
+			Msg("condition not met, re-queueing")
+
 		// Re-queue the item for later evaluation
-		// Note: We already dequeued, so we need to re-add it
 		if err := s.queueService.InsertAt(ctx, agentID, 0, item); err != nil {
 			return fmt.Errorf("failed to re-queue conditional item: %w", err)
 		}
 		return nil
 	}
+
+	s.logger.Debug().
+		Str("agent_id", agentID).
+		Str("item_id", item.ID).
+		Str("condition_type", string(payload.ConditionType)).
+		Str("reason", result.Reason).
+		Msg("condition met, dispatching message")
 
 	// Condition met, send the message
 	opts := &agent.SendMessageOptions{
@@ -697,46 +837,68 @@ func (s *Scheduler) dispatchConditional(ctx context.Context, agentID string, ite
 	return nil
 }
 
-// evaluateCondition evaluates a conditional payload.
-func (s *Scheduler) evaluateCondition(ctx context.Context, agentID string, payload models.ConditionalPayload) (bool, error) {
-	switch payload.ConditionType {
-	case models.ConditionTypeWhenIdle:
-		// Check if agent is idle
-		a, err := s.agentService.GetAgent(ctx, agentID)
-		if err != nil {
-			return false, err
-		}
-		return a.State == models.AgentStateIdle, nil
+func (s *Scheduler) handleDispatchFailure(ctx context.Context, agentID string, item *models.QueueItem, dispatchErr error) error {
+	if s.queueService == nil || item == nil {
+		return nil
+	}
 
-	case models.ConditionTypeAfterCooldown:
-		// Check if enough time has passed since last activity
-		a, err := s.agentService.GetAgent(ctx, agentID)
-		if err != nil {
-			return false, err
-		}
-		if a.LastActivity == nil {
-			return true, nil // No last activity, condition met
-		}
-		// Default 30 second cooldown
-		cooldown := 30 * time.Second
-		return time.Since(*a.LastActivity) >= cooldown, nil
+	attempts := item.Attempts + 1
+	maxRetries := s.config.MaxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
 
-	case models.ConditionTypeAfterPrevious:
-		// This condition is met when the previous item completed
-		// Since we're processing in order, this is always true
-		return true, nil
+	if attempts <= maxRetries {
+		if err := s.queueService.UpdateAttempts(ctx, item.ID, attempts); err != nil {
+			return err
+		}
+		if err := s.queueService.UpdateStatus(ctx, item.ID, models.QueueItemStatusPending, dispatchErr.Error()); err != nil {
+			return err
+		}
 
-	case models.ConditionTypeCustomExpression:
-		// Custom expressions not yet implemented
+		backoff := s.retryBackoff(attempts)
+		s.setRetryAfter(agentID, time.Now().UTC().Add(backoff))
 		s.logger.Warn().
 			Str("agent_id", agentID).
-			Str("expression", payload.Expression).
-			Msg("custom expressions not yet implemented")
-		return false, fmt.Errorf("custom expressions not implemented")
-
-	default:
-		return false, fmt.Errorf("unknown condition type: %s", payload.ConditionType)
+			Str("item_id", item.ID).
+			Int("attempt", attempts).
+			Int("max_retries", maxRetries).
+			Dur("backoff", backoff).
+			Msg("dispatch failed; retry scheduled")
+		return nil
 	}
+
+	if err := s.queueService.UpdateAttempts(ctx, item.ID, attempts); err != nil {
+		return err
+	}
+	if err := s.queueService.UpdateStatus(ctx, item.ID, models.QueueItemStatusFailed, dispatchErr.Error()); err != nil {
+		return err
+	}
+
+	s.clearRetryAfter(agentID)
+	s.logger.Warn().
+		Str("agent_id", agentID).
+		Str("item_id", item.ID).
+		Int("attempt", attempts).
+		Int("max_retries", maxRetries).
+		Msg("dispatch failed; max retries exceeded")
+	return nil
+}
+
+func (s *Scheduler) retryBackoff(attempt int) time.Duration {
+	base := s.config.RetryBackoff
+	if base <= 0 {
+		base = DefaultConfig().RetryBackoff
+	}
+	if attempt <= 1 {
+		return base
+	}
+
+	backoff := base
+	for i := 1; i < attempt; i++ {
+		backoff *= 2
+	}
+	return backoff
 }
 
 // recordDispatch records a dispatch event in stats.
@@ -779,13 +941,25 @@ func (s *Scheduler) onStateChange(change state.StateChange) {
 }
 
 func (s *Scheduler) handleRateLimit(change state.StateChange) {
-	if s.accountService == nil || s.agentService == nil {
-		return
-	}
-
 	ctx := s.ctx
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	if s.queueService != nil {
+		duration := s.rateLimitPauseDuration(change.StateInfo)
+		if duration > 0 {
+			if err := s.enqueueCooldownPause(ctx, change.AgentID, duration, change.StateInfo); err != nil {
+				s.logger.Warn().
+					Err(err).
+					Str("agent_id", change.AgentID).
+					Msg("failed to enqueue cooldown pause")
+			}
+		}
+	}
+
+	if s.accountService == nil || s.agentService == nil {
+		return
 	}
 
 	agentInfo, err := s.agentService.GetAgent(ctx, change.AgentID)
@@ -811,4 +985,83 @@ func (s *Scheduler) handleRateLimit(change state.StateChange) {
 		Str("agent_id", change.AgentID).
 		Str("account_id", agentInfo.AccountID).
 		Msg("account placed on cooldown due to rate limit")
+}
+
+func (s *Scheduler) rateLimitPauseDuration(info models.StateInfo) time.Duration {
+	if duration := retryAfterFromEvidence(info.Evidence); duration > 0 {
+		return duration
+	}
+	if s.config.DefaultCooldownDuration > 0 {
+		return s.config.DefaultCooldownDuration
+	}
+	return DefaultConfig().DefaultCooldownDuration
+}
+
+func retryAfterFromEvidence(evidence []string) time.Duration {
+	for _, entry := range evidence {
+		trimmed := strings.TrimSpace(entry)
+		if !strings.HasPrefix(trimmed, "retry_after=") {
+			continue
+		}
+		raw := strings.TrimPrefix(trimmed, "retry_after=")
+		if raw == "" {
+			continue
+		}
+		if duration, err := time.ParseDuration(raw); err == nil {
+			if duration > 0 {
+				return duration
+			}
+			continue
+		}
+		if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+	return 0
+}
+
+func (s *Scheduler) enqueueCooldownPause(ctx context.Context, agentID string, duration time.Duration, info models.StateInfo) error {
+	if duration <= 0 {
+		return nil
+	}
+	seconds := durationSecondsCeil(duration)
+	if seconds < 1 {
+		return nil
+	}
+
+	reason := "auto-pause after rate limit"
+	if strings.TrimSpace(info.Reason) != "" {
+		reason = fmt.Sprintf("auto-pause after rate limit: %s", info.Reason)
+	}
+
+	payload := models.PausePayload{
+		DurationSeconds: seconds,
+		Reason:          reason,
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal pause payload: %w", err)
+	}
+
+	item := &models.QueueItem{
+		Type:    models.QueueItemTypePause,
+		Status:  models.QueueItemStatusPending,
+		Payload: payloadBytes,
+	}
+
+	return s.queueService.InsertAt(ctx, agentID, 1, item)
+}
+
+func durationSecondsCeil(duration time.Duration) int {
+	if duration <= 0 {
+		return 0
+	}
+	seconds := int(duration / time.Second)
+	if duration%time.Second != 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		return 1
+	}
+	return seconds
 }
