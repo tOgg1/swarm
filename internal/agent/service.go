@@ -377,7 +377,7 @@ func (s *Service) TerminateAgent(ctx context.Context, id string) error {
 	// Delete agent from database
 	if err := s.repo.Delete(ctx, id); err != nil {
 		if errors.Is(err, db.ErrAgentNotFound) {
-			return ErrAgentNotFound
+			return ErrServiceAgentNotFound
 		}
 		return fmt.Errorf("%w: %v", ErrTerminateFailed, err)
 	}
