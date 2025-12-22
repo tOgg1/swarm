@@ -60,6 +60,15 @@ type ConnectionOptions struct {
 	// ProxyJump specifies a bastion host to reach the target (user@host:port).
 	ProxyJump string
 
+	// ControlMaster configures SSH multiplexing (auto/yes/no).
+	ControlMaster string
+
+	// ControlPath is the socket path for SSH multiplexing.
+	ControlPath string
+
+	// ControlPersist controls how long master connections stay alive.
+	ControlPersist string
+
 	// Timeout controls how long to wait when establishing connections.
 	Timeout time.Duration
 }
@@ -148,6 +157,20 @@ func ApplySSHConfig(opts ConnectionOptions) (ConnectionOptions, error) {
 					opts.ProxyJump = proxy
 				}
 			}
+		case "controlmaster":
+			if opts.ControlMaster == "" {
+				opts.ControlMaster = strings.TrimSpace(value)
+			}
+		case "controlpath":
+			if opts.ControlPath == "" {
+				if expanded := expandSSHPath(value); expanded != "" {
+					opts.ControlPath = expanded
+				}
+			}
+		case "controlpersist":
+			if opts.ControlPersist == "" {
+				opts.ControlPersist = strings.TrimSpace(value)
+			}
 		}
 	}
 
@@ -223,16 +246,30 @@ func expandSSHPath(value string) string {
 }
 
 func normalizeProxyJump(value string) string {
+	jumps := parseProxyJumpList(value)
+	if len(jumps) == 0 {
+		return ""
+	}
+	return strings.Join(jumps, ",")
+}
+
+func parseProxyJumpList(value string) []string {
 	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return ""
+	if trimmed == "" || strings.EqualFold(trimmed, "none") {
+		return nil
 	}
-	if strings.EqualFold(trimmed, "none") {
-		return ""
-	}
+
 	parts := strings.Split(trimmed, ",")
-	if len(parts) == 0 {
-		return ""
+	jumps := make([]string, 0, len(parts))
+	for _, part := range parts {
+		jump := strings.TrimSpace(part)
+		if jump == "" {
+			continue
+		}
+		if strings.EqualFold(jump, "none") {
+			return nil
+		}
+		jumps = append(jumps, jump)
 	}
-	return strings.TrimSpace(parts[0])
+	return jumps
 }
