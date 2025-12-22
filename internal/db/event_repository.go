@@ -24,6 +24,10 @@ type EventRepository struct {
 	db *DB
 }
 
+type eventExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 // NewEventRepository creates a new EventRepository.
 func NewEventRepository(db *DB) *EventRepository {
 	return &EventRepository{db: db}
@@ -34,7 +38,7 @@ type EventQuery struct {
 	Type       *models.EventType  // Filter by event type
 	EntityType *models.EntityType // Filter by entity type
 	EntityID   *string            // Filter by entity ID
-	Since      *time.Time         // Events after this time (exclusive)
+	Since      *time.Time         // Events at or after this time (inclusive)
 	Until      *time.Time         // Events before this time (exclusive)
 	Cursor     string             // Pagination cursor (event ID)
 	Limit      int                // Max results to return
@@ -57,6 +61,18 @@ func (r *EventRepository) Append(ctx context.Context, event *models.Event) error
 
 // Create appends a new event to the event log.
 func (r *EventRepository) Create(ctx context.Context, event *models.Event) error {
+	return r.createWithExecutor(ctx, r.db, event)
+}
+
+// CreateWithTx appends a new event using an existing transaction.
+func (r *EventRepository) CreateWithTx(ctx context.Context, tx *sql.Tx, event *models.Event) error {
+	if tx == nil {
+		return fmt.Errorf("transaction is required")
+	}
+	return r.createWithExecutor(ctx, tx, event)
+}
+
+func (r *EventRepository) createWithExecutor(ctx context.Context, execer eventExecer, event *models.Event) error {
 	if event.Type == "" {
 		return fmt.Errorf("event type is required")
 	}
@@ -72,6 +88,8 @@ func (r *EventRepository) Create(ctx context.Context, event *models.Event) error
 	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
+	} else {
+		event.Timestamp = event.Timestamp.UTC()
 	}
 
 	var payloadJSON *string
@@ -90,7 +108,7 @@ func (r *EventRepository) Create(ctx context.Context, event *models.Event) error
 		metadataJSON = &s
 	}
 
-	_, err := r.db.ExecContext(ctx, `
+	_, err := execer.ExecContext(ctx, `
 		INSERT INTO events (
 			id, timestamp, type, entity_type, entity_id, payload_json, metadata_json
 		) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -144,12 +162,12 @@ func (r *EventRepository) Query(ctx context.Context, q EventQuery) (*EventPage, 
 		args = append(args, *q.EntityID)
 	}
 	if q.Since != nil {
-		query += ` AND timestamp > ?`
-		args = append(args, q.Since.Format(time.RFC3339))
+		query += ` AND timestamp >= ?`
+		args = append(args, q.Since.UTC().Format(time.RFC3339))
 	}
 	if q.Until != nil {
 		query += ` AND timestamp < ?`
-		args = append(args, q.Until.Format(time.RFC3339))
+		args = append(args, q.Until.UTC().Format(time.RFC3339))
 	}
 	if q.Cursor != "" {
 		// Cursor is the last event ID; fetch events with timestamp >= cursor's timestamp
