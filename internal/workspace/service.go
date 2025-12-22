@@ -355,10 +355,6 @@ func (s *Service) GetWorkspaceStatus(ctx context.Context, id string) (*Workspace
 		}
 	}
 
-	// TODO: Get agent state counts when AgentRepository has ListByWorkspaceAndState
-	// For now, just use total count
-	result.ActiveAgents = workspace.AgentCount
-
 	// Populate alerts from agent states when available.
 	if s.agentRepo != nil {
 		agents, err := s.agentRepo.ListByWorkspace(ctx, workspace.ID)
@@ -378,6 +374,9 @@ func (s *Service) GetWorkspaceStatus(ctx context.Context, id string) (*Workspace
 				}
 			}
 		}
+	} else {
+		// Fallback when agent repository isn't wired.
+		result.ActiveAgents = workspace.AgentCount
 	}
 
 	return result, nil
