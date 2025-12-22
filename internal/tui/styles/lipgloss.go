@@ -4,6 +4,7 @@ import "github.com/charmbracelet/lipgloss"
 
 // Styles contains lipgloss styles derived from theme tokens.
 type Styles struct {
+	Theme        Theme
 	Title        lipgloss.Style
 	Text         lipgloss.Style
 	Muted        lipgloss.Style
@@ -31,6 +32,7 @@ func BuildStyles(theme Theme) Styles {
 	tokens := theme.Tokens
 
 	return Styles{
+		Theme:        theme,
 		Title:        lipgloss.NewStyle().Foreground(lipgloss.Color(tokens.Text)).Bold(true),
 		Text:         lipgloss.NewStyle().Foreground(lipgloss.Color(tokens.Text)),
 		Muted:        lipgloss.NewStyle().Foreground(lipgloss.Color(tokens.TextMuted)),

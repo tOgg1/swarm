@@ -39,6 +39,9 @@ type Workspace struct {
 	// AgentCount is the number of agents in this workspace.
 	AgentCount int `json:"agent_count"`
 
+	// AgentStats contains the breakdown of agents by state.
+	AgentStats AgentStats `json:"agent_stats"`
+
 	// Alerts contains current alerts for this workspace.
 	Alerts []Alert `json:"alerts,omitempty"`
 
@@ -47,6 +50,14 @@ type Workspace struct {
 
 	// UpdatedAt is when the workspace was last updated.
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// AgentStats contains the breakdown of agents by state.
+type AgentStats struct {
+	Working int `json:"working"`
+	Idle    int `json:"idle"`
+	Blocked int `json:"blocked"`
+	Error   int `json:"error"`
 }
 
 // GitInfo contains information about the git repository.
