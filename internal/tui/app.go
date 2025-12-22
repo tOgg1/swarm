@@ -421,7 +421,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastUpdated = time.Now()
 			m.stale = false
 			return m, staleCheckCmd(m.lastUpdated)
-		case "q", "esc", "ctrl+c":
+		case "esc":
+			// Go back from agent detail view
+			if m.view == viewAgentDetail {
+				m.view = viewAgent
+				m.selectedView = m.view
+				return m, nil
+			}
+			return m, tea.Quit
+		case "q", "ctrl+c":
 			return m, tea.Quit
 		}
 	case tea.WindowSizeMsg:
@@ -1386,6 +1394,234 @@ func (m model) dashboardView() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, nodesPanel, spacer, activityPanel)
 }
 
+// agentDetailView renders a full-screen agent detail view.
+func (m model) agentDetailView() []string {
+	card := m.selectedAgentCard()
+	if card == nil {
+		return []string{m.styles.Warning.Render("No agent selected. Press Esc to go back.")}
+	}
+
+	lines := []string{}
+
+	// Header with agent name and back hint
+	header := m.styles.Title.Render(fmt.Sprintf("Agent: %s", card.Name))
+	backHint := m.styles.Muted.Render("Esc: back | Q: queue | I: interrupt | R: restart | P: pause")
+	lines = append(lines, header, backHint, "")
+
+	// Calculate layout widths
+	leftWidth := m.width * 2 / 3
+	rightWidth := m.width - leftWidth - 2
+	if leftWidth < 40 {
+		leftWidth = 40
+	}
+	if rightWidth < 30 {
+		rightWidth = 30
+	}
+
+	// Left panel: Transcript
+	transcriptPanel := m.renderAgentDetailTranscript(leftWidth)
+
+	// Right panel: Profile + Queue + Activity
+	profilePanel := m.renderAgentDetailProfile(card, rightWidth)
+	queuePanel := m.renderAgentDetailQueue(card, rightWidth)
+	activityPanel := m.renderAgentDetailActivity(card, rightWidth)
+	rightPanels := joinLines([]string{profilePanel, "", queuePanel, "", activityPanel})
+
+	// Join panels horizontally
+	mainContent := lipgloss.JoinHorizontal(lipgloss.Top, transcriptPanel, "  ", rightPanels)
+	lines = append(lines, mainContent)
+
+	return lines
+}
+
+// renderAgentDetailTranscript renders the transcript panel for agent detail view.
+func (m model) renderAgentDetailTranscript(width int) string {
+	if m.transcriptViewer == nil {
+		return m.renderPanel("Transcript", width, []string{
+			m.styles.Muted.Render("No transcript available."),
+		})
+	}
+
+	m.transcriptViewer.Width = width - 4
+	m.transcriptViewer.Height = m.height - 8
+	content := m.transcriptViewer.Render(m.styles)
+
+	// Wrap in a panel
+	panelStyle := m.styles.Panel.Copy().Width(width).Padding(0, 1)
+	title := m.styles.Accent.Render("Transcript")
+	if m.transcriptPreview {
+		title = m.styles.Accent.Render("Transcript") + " " + m.styles.Warning.Render("(sample)")
+	}
+
+	autoHint := ""
+	if m.transcriptAutoScroll {
+		autoHint = m.styles.Muted.Render(" [auto-scroll on]")
+	}
+
+	return panelStyle.Render(joinLines([]string{title + autoHint, content}))
+}
+
+// renderAgentDetailProfile renders the profile panel for agent detail view.
+func (m model) renderAgentDetailProfile(card *components.AgentCard, width int) string {
+	lines := []string{}
+
+	// State badge
+	stateLine := fmt.Sprintf("State: %s", components.RenderAgentStateBadge(m.styles, card.State))
+	lines = append(lines, stateLine)
+
+	// Type and model
+	typeLine := m.styles.Text.Render(fmt.Sprintf("Type: %s", defaultIfEmpty(string(card.Type), "unknown")))
+	modelLine := m.styles.Text.Render(fmt.Sprintf("Model: %s", defaultIfEmpty(card.Model, "--")))
+	lines = append(lines, typeLine, modelLine)
+
+	// Profile
+	profileLine := m.styles.Muted.Render(fmt.Sprintf("Profile: %s", defaultIfEmpty(card.Profile, "--")))
+	lines = append(lines, profileLine)
+
+	// Confidence
+	confidenceLabel, bars, style := agentConfidenceDescriptor(m.styles, card.Confidence)
+	confidenceLine := fmt.Sprintf("Confidence: %s", style.Render(fmt.Sprintf("%s %s", confidenceLabel, bars)))
+	lines = append(lines, confidenceLine)
+
+	// Last activity
+	lastActivity := "--"
+	if card.LastActivity != nil {
+		lastActivity = card.LastActivity.Format("15:04:05")
+	}
+	lastLine := m.styles.Muted.Render(fmt.Sprintf("Last activity: %s", lastActivity))
+	lines = append(lines, lastLine)
+
+	// Activity pulse
+	pulse := components.NewActivityPulse(card.RecentEvents, card.State, card.LastActivity)
+	activityLine := components.RenderActivityLine(m.styles, pulse)
+	lines = append(lines, activityLine)
+
+	// Reason
+	if card.Reason != "" {
+		reasonLine := m.styles.Muted.Render(fmt.Sprintf("Reason: %s", truncateString(card.Reason, width-12)))
+		lines = append(lines, reasonLine)
+	}
+
+	// Cooldown
+	if card.CooldownUntil != nil && !card.CooldownUntil.IsZero() {
+		remaining := time.Until(*card.CooldownUntil)
+		if remaining > 0 {
+			cooldownLine := m.styles.Warning.Render(fmt.Sprintf("Cooldown: %s remaining", formatDurationShort(remaining)))
+			lines = append(lines, cooldownLine)
+		}
+	}
+
+	return m.renderPanel("Profile", width, lines)
+}
+
+// renderAgentDetailQueue renders the queue panel for agent detail view.
+func (m model) renderAgentDetailQueue(card *components.AgentCard, width int) string {
+	lines := []string{}
+
+	// Queue length
+	queueLen := card.QueueLength
+	if queueLen < 0 {
+		queueLen = 0
+	}
+	queueLine := fmt.Sprintf("Items: %d", queueLen)
+	lines = append(lines, m.styles.Text.Render(queueLine))
+
+	// Show queue items if available
+	if state, _ := m.currentQueueEditorState(); state != nil && len(state.Items) > 0 {
+		lines = append(lines, "")
+		for i, item := range state.Items {
+			if i >= 5 {
+				lines = append(lines, m.styles.Muted.Render(fmt.Sprintf("  ... and %d more", len(state.Items)-5)))
+				break
+			}
+			prefix := "  "
+			if i == state.Selected {
+				prefix = "> "
+			}
+			itemLine := fmt.Sprintf("%s%s: %s", prefix, item.ID, truncateString(item.Summary, width-20))
+			lines = append(lines, m.styles.Muted.Render(itemLine))
+		}
+	} else {
+		lines = append(lines, m.styles.Muted.Render("No queue items"))
+	}
+
+	return m.renderPanel("Queue", width, lines)
+}
+
+// renderAgentDetailActivity renders the activity panel for agent detail view.
+func (m model) renderAgentDetailActivity(card *components.AgentCard, width int) string {
+	lines := []string{}
+
+	// Recent state changes for this agent
+	agentChanges := []StateChangeMsg{}
+	for _, change := range m.stateChanges {
+		if strings.Contains(change.AgentID, card.Name) || strings.HasSuffix(card.Name, shortID(change.AgentID)) {
+			agentChanges = append(agentChanges, change)
+		}
+	}
+
+	if len(agentChanges) > 0 {
+		for i := len(agentChanges) - 1; i >= 0 && len(lines) < 5; i-- {
+			change := agentChanges[i]
+			prevBadge := components.RenderAgentStateBadge(m.styles, change.PreviousState)
+			currBadge := components.RenderAgentStateBadge(m.styles, change.CurrentState)
+			timeLine := change.Timestamp.Format("15:04:05")
+			line := fmt.Sprintf("%s: %s -> %s", timeLine, prevBadge, currBadge)
+			lines = append(lines, line)
+		}
+	} else {
+		lines = append(lines, m.styles.Muted.Render("No recent state changes"))
+	}
+
+	// Activity sparkline
+	pulse := components.NewActivityPulse(card.RecentEvents, card.State, card.LastActivity)
+	sparkline := components.RenderActivitySparkline(m.styles, pulse, 16)
+	lines = append(lines, "", fmt.Sprintf("Activity: %s", sparkline))
+
+	return m.renderPanel("Recent Activity", width, lines)
+}
+
+// Helper functions for agent detail view
+func defaultIfEmpty(s, fallback string) string {
+	if strings.TrimSpace(s) == "" {
+		return fallback
+	}
+	return s
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return "..."
+	}
+	return s[:maxLen-3] + "..."
+}
+
+func formatDurationShort(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
+	}
+	return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
+}
+
+func agentConfidenceDescriptor(styleSet styles.Styles, confidence models.StateConfidence) (string, string, lipgloss.Style) {
+	switch confidence {
+	case models.StateConfidenceHigh:
+		return "High", "###", styleSet.Success
+	case models.StateConfidenceMedium:
+		return "Medium", "##-", styleSet.Warning
+	case models.StateConfidenceLow:
+		return "Low", "#--", styleSet.Error
+	default:
+		return "Unknown", "---", styleSet.Muted
+	}
+}
+
 func (m model) dashboardWidths() (leftWidth, rightWidth, gap int) {
 	total := m.width
 	if total == 0 {
@@ -1650,6 +1886,8 @@ func viewLabel(view viewID) string {
 		return "Workspace"
 	case viewAgent:
 		return "Agent"
+	case viewAgentDetail:
+		return "Agent Detail"
 	default:
 		return "Unknown"
 	}
