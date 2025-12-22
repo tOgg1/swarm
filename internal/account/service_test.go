@@ -325,3 +325,172 @@ func TestService_SetCooldownForRateLimit(t *testing.T) {
 func timePtr(t time.Time) *time.Time {
 	return &t
 }
+
+func TestService_RotateAccountForAgent_EmitsEvent(t *testing.T) {
+	cfg := config.DefaultConfig()
+	ctx := context.Background()
+
+	publisher := &testPublisher{}
+	service := NewService(cfg, WithPublisher(publisher))
+
+	now := time.Now().UTC()
+
+	// Create current account (on cooldown)
+	current := &models.Account{
+		Provider:      models.ProviderOpenAI,
+		ProfileName:   "current",
+		CredentialRef: "env:OPENAI_API_KEY",
+		IsActive:      true,
+		CooldownUntil: timePtr(now.Add(1 * time.Hour)),
+		UsageStats: &models.UsageStats{
+			LastUsed: timePtr(now.Add(-30 * time.Minute)),
+		},
+	}
+
+	// Create target account (available)
+	target := &models.Account{
+		Provider:      models.ProviderOpenAI,
+		ProfileName:   "target",
+		CredentialRef: "env:OPENAI_API_KEY_2",
+		IsActive:      true,
+		UsageStats: &models.UsageStats{
+			LastUsed: timePtr(now.Add(-2 * time.Hour)),
+		},
+	}
+
+	for _, acct := range []*models.Account{current, target} {
+		if err := service.AddAccount(ctx, acct); err != nil {
+			t.Fatalf("AddAccount failed: %v", err)
+		}
+	}
+
+	// Rotate with agent ID and reason
+	agentID := "agent-123"
+	reason := "cooldown"
+	rotated, err := service.RotateAccountForAgent(ctx, current.ID, agentID, reason)
+	if err != nil {
+		t.Fatalf("RotateAccountForAgent failed: %v", err)
+	}
+
+	if rotated.ProfileName != "target" {
+		t.Fatalf("expected rotated to target, got %s", rotated.ProfileName)
+	}
+
+	// Check event was emitted
+	if len(publisher.events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(publisher.events))
+	}
+
+	event := publisher.events[0]
+	if event.Type != models.EventTypeAccountRotated {
+		t.Fatalf("expected account.rotated event, got %s", event.Type)
+	}
+	if event.EntityType != models.EntityTypeAccount {
+		t.Fatalf("expected account entity type, got %s", event.EntityType)
+	}
+	if event.EntityID != target.ID {
+		t.Fatalf("expected entity ID to be new account ID %s, got %s", target.ID, event.EntityID)
+	}
+
+	var payload models.AccountRotatedPayload
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		t.Fatalf("failed to unmarshal payload: %v", err)
+	}
+
+	if payload.AgentID != agentID {
+		t.Errorf("expected agent_id %q, got %q", agentID, payload.AgentID)
+	}
+	if payload.OldAccountID != current.ID {
+		t.Errorf("expected old_account_id %q, got %q", current.ID, payload.OldAccountID)
+	}
+	if payload.NewAccountID != target.ID {
+		t.Errorf("expected new_account_id %q, got %q", target.ID, payload.NewAccountID)
+	}
+	if payload.Reason != reason {
+		t.Errorf("expected reason %q, got %q", reason, payload.Reason)
+	}
+}
+
+func TestService_RotateAccountForAgent_DefaultReason(t *testing.T) {
+	cfg := config.DefaultConfig()
+	ctx := context.Background()
+
+	publisher := &testPublisher{}
+	service := NewService(cfg, WithPublisher(publisher))
+
+	now := time.Now().UTC()
+
+	current := &models.Account{
+		Provider:      models.ProviderOpenAI,
+		ProfileName:   "current",
+		CredentialRef: "env:OPENAI_API_KEY",
+		IsActive:      true,
+	}
+	target := &models.Account{
+		Provider:      models.ProviderOpenAI,
+		ProfileName:   "target",
+		CredentialRef: "env:OPENAI_API_KEY_2",
+		IsActive:      true,
+		UsageStats: &models.UsageStats{
+			LastUsed: timePtr(now.Add(-1 * time.Hour)),
+		},
+	}
+
+	for _, acct := range []*models.Account{current, target} {
+		if err := service.AddAccount(ctx, acct); err != nil {
+			t.Fatalf("AddAccount failed: %v", err)
+		}
+	}
+
+	// Rotate with empty reason - should default to "cooldown"
+	_, err := service.RotateAccountForAgent(ctx, current.ID, "agent-1", "")
+	if err != nil {
+		t.Fatalf("RotateAccountForAgent failed: %v", err)
+	}
+
+	if len(publisher.events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(publisher.events))
+	}
+
+	var payload models.AccountRotatedPayload
+	if err := json.Unmarshal(publisher.events[0].Payload, &payload); err != nil {
+		t.Fatalf("failed to unmarshal payload: %v", err)
+	}
+
+	if payload.Reason != "cooldown" {
+		t.Errorf("expected default reason 'cooldown', got %q", payload.Reason)
+	}
+}
+
+func TestService_RotateAccount_NoEventWithoutPublisher(t *testing.T) {
+	cfg := config.DefaultConfig()
+	ctx := context.Background()
+
+	// Service without publisher
+	service := NewService(cfg)
+
+	current := &models.Account{
+		Provider:      models.ProviderOpenAI,
+		ProfileName:   "current",
+		CredentialRef: "env:OPENAI_API_KEY",
+		IsActive:      true,
+	}
+	target := &models.Account{
+		Provider:      models.ProviderOpenAI,
+		ProfileName:   "target",
+		CredentialRef: "env:OPENAI_API_KEY_2",
+		IsActive:      true,
+	}
+
+	for _, acct := range []*models.Account{current, target} {
+		if err := service.AddAccount(ctx, acct); err != nil {
+			t.Fatalf("AddAccount failed: %v", err)
+		}
+	}
+
+	// Rotate should succeed even without publisher (no panic)
+	_, err := service.RotateAccount(ctx, current.ID)
+	if err != nil {
+		t.Fatalf("RotateAccount failed: %v", err)
+	}
+}

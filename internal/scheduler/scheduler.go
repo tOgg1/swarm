@@ -544,7 +544,7 @@ func (s *Scheduler) dispatchToAgent(agentID string) {
 
 		if onCooldown {
 			// Try to rotate to another account
-			rotated, rotateErr := s.accountService.RotateAccount(ctx, agentInfo.AccountID)
+			rotated, rotateErr := s.accountService.RotateAccountForAgent(ctx, agentInfo.AccountID, agentID, "cooldown")
 			if rotateErr != nil {
 				s.logger.Debug().
 					Str("agent_id", agentID).

@@ -322,6 +322,13 @@ func (s *Service) GetAvailable(ctx context.Context, provider models.Provider) (*
 // RotateAccount finds an alternative account when the current one is on cooldown.
 // Returns the new account or ErrNoAvailableAccount if none available.
 func (s *Service) RotateAccount(ctx context.Context, currentID string) (*models.Account, error) {
+	return s.RotateAccountForAgent(ctx, currentID, "", "")
+}
+
+// RotateAccountForAgent finds an alternative account and emits a rotation event.
+// If agentID is provided, it will be included in the event payload.
+// The reason describes why the rotation occurred (e.g., "cooldown", "rate_limit").
+func (s *Service) RotateAccountForAgent(ctx context.Context, currentID, agentID, reason string) (*models.Account, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -348,7 +355,16 @@ func (s *Service) RotateAccount(ctx context.Context, currentID string) (*models.
 	s.logger.Info().
 		Str("from_account", currentID).
 		Str("to_account", next.ID).
+		Str("agent_id", agentID).
+		Str("reason", reason).
 		Msg("rotating account")
+
+	// Emit rotation event
+	if reason == "" {
+		reason = "cooldown"
+	}
+	s.publishRotationEvent(ctx, agentID, currentID, next.ID, reason)
+
 	return next, nil
 }
 
@@ -514,6 +530,34 @@ func (s *Service) publishRateLimitEvent(ctx context.Context, account *models.Acc
 		Type:       models.EventTypeRateLimitDetected,
 		EntityType: models.EntityTypeAccount,
 		EntityID:   account.ID,
+		Payload:    payload,
+	})
+}
+
+func (s *Service) publishRotationEvent(ctx context.Context, agentID, oldAccountID, newAccountID, reason string) {
+	if s.publisher == nil {
+		return
+	}
+
+	payload, err := json.Marshal(models.AccountRotatedPayload{
+		AgentID:      agentID,
+		OldAccountID: oldAccountID,
+		NewAccountID: newAccountID,
+		Reason:       reason,
+	})
+	if err != nil {
+		s.logger.Warn().Err(err).
+			Str("old_account_id", oldAccountID).
+			Str("new_account_id", newAccountID).
+			Msg("failed to marshal rotation payload")
+		return
+	}
+
+	// Use the new account ID as the entity ID since that's the active account now
+	s.publisher.Publish(ctx, &models.Event{
+		Type:       models.EventTypeAccountRotated,
+		EntityType: models.EntityTypeAccount,
+		EntityID:   newAccountID,
 		Payload:    payload,
 	})
 }
