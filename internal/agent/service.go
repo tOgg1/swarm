@@ -23,6 +23,8 @@ var (
 	ErrSpawnFailed          = errors.New("failed to spawn agent")
 	ErrInterruptFailed      = errors.New("failed to interrupt agent")
 	ErrTerminateFailed      = errors.New("failed to terminate agent")
+	ErrSendFailed           = errors.New("failed to send message to agent")
+	ErrAgentNotIdle         = errors.New("agent is not idle")
 )
 
 // Service manages agent lifecycle operations.
@@ -477,4 +479,142 @@ func (s *Service) buildStartCommand(agentType models.AgentType, accountID string
 // GetPaneMap returns the pane mapping registry.
 func (s *Service) GetPaneMap() *PaneMap {
 	return s.paneMap
+}
+
+// SendMessageOptions contains options for sending a message to an agent.
+type SendMessageOptions struct {
+	// SkipIdleCheck bypasses the idle state verification.
+	SkipIdleCheck bool
+
+	// WaitForStable waits for the screen to stabilize after sending.
+	WaitForStable bool
+
+	// StableRounds is the number of unchanged polls needed to consider stable.
+	StableRounds int
+
+	// MaxRetries is the maximum number of retry attempts on failure.
+	// 0 means no retries (default).
+	MaxRetries int
+
+	// RetryBackoff is the initial backoff duration between retries.
+	// Doubles on each retry. Defaults to 100ms.
+	RetryBackoff time.Duration
+}
+
+// SendMessage sends a message to an agent.
+// By default, it verifies the agent is in an idle state before sending.
+// The message is sent via the adapter for proper formatting.
+func (s *Service) SendMessage(ctx context.Context, id, message string, opts *SendMessageOptions) error {
+	if opts == nil {
+		opts = &SendMessageOptions{}
+	}
+
+	s.logger.Debug().
+		Str("agent_id", id).
+		Str("message", message).
+		Msg("sending message to agent")
+
+	agent, err := s.GetAgent(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	// Verify agent is idle (unless skipped)
+	if !opts.SkipIdleCheck && agent.State != models.AgentStateIdle {
+		return fmt.Errorf("%w: current state is %s", ErrAgentNotIdle, agent.State)
+	}
+
+	if agent.TmuxPane == "" {
+		return fmt.Errorf("%w: agent has no tmux pane", ErrSendFailed)
+	}
+
+	// Update state to working
+	now := time.Now().UTC()
+	agent.State = models.AgentStateWorking
+	agent.StateInfo = models.StateInfo{
+		State:      models.AgentStateWorking,
+		Confidence: models.StateConfidenceMedium,
+		Reason:     "Message sent, awaiting response",
+		DetectedAt: now,
+	}
+	agent.LastActivity = &now
+
+	if err := s.repo.Update(ctx, agent); err != nil {
+		s.logger.Warn().Err(err).Str("agent_id", id).Msg("failed to update agent state before send")
+	}
+
+	// Send the message via tmux with optional retry
+	backoff := opts.RetryBackoff
+	if backoff <= 0 {
+		backoff = 100 * time.Millisecond
+	}
+
+	var lastErr error
+	maxAttempts := opts.MaxRetries + 1 // +1 for initial attempt
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Check context cancellation
+		if ctx.Err() != nil {
+			lastErr = ctx.Err()
+			break
+		}
+
+		// Check if pane is still active
+		paneActive, err := s.tmuxClient.HasSession(ctx, agent.TmuxPane)
+		if err != nil || !paneActive {
+			lastErr = fmt.Errorf("pane is dead or inaccessible")
+			break // Don't retry if pane is dead
+		}
+
+		// Send the message
+		if opts.WaitForStable {
+			stableRounds := opts.StableRounds
+			if stableRounds <= 0 {
+				stableRounds = 3
+			}
+			_, lastErr = s.tmuxClient.SendAndWait(ctx, agent.TmuxPane, message, true, true, stableRounds)
+		} else {
+			lastErr = s.tmuxClient.SendKeys(ctx, agent.TmuxPane, message, true, true)
+		}
+
+		if lastErr == nil {
+			break // Success
+		}
+
+		// Log retry attempt
+		if attempt < maxAttempts {
+			s.logger.Warn().
+				Err(lastErr).
+				Str("agent_id", id).
+				Int("attempt", attempt).
+				Int("max_attempts", maxAttempts).
+				Dur("backoff", backoff).
+				Msg("send failed, retrying")
+
+			time.Sleep(backoff)
+			backoff *= 2 // Exponential backoff
+		}
+	}
+
+	if lastErr != nil {
+		// Revert state on failure
+		agent.State = models.AgentStateError
+		agent.StateInfo = models.StateInfo{
+			State:      models.AgentStateError,
+			Confidence: models.StateConfidenceHigh,
+			Reason:     fmt.Sprintf("Send failed after %d attempts: %v", maxAttempts, lastErr),
+			DetectedAt: time.Now().UTC(),
+		}
+		_ = s.repo.Update(ctx, agent)
+		return fmt.Errorf("%w: %v", ErrSendFailed, lastErr)
+	}
+
+	s.logger.Info().
+		Str("agent_id", id).
+		Msg("message sent to agent")
+
+	return nil
 }
