@@ -919,7 +919,7 @@ func (m model) approvalsInboxLines() []string {
 		m.styles.Muted.Render(fmt.Sprintf("Workspace: %s", workspaceDisplayName(ws))),
 		m.styles.Muted.Render(fmt.Sprintf("Pending: %d / %d", pending, len(approvals))),
 		m.styles.Muted.Render(fmt.Sprintf("Selected: %d", selectedCount)),
-		m.styles.Muted.Render("↑↓/jk: move | x: select | Ctrl+A: select all | y: approve | n: deny | Y/N: bulk | esc: close"),
+		m.styles.Muted.Render("↑↓/jk: move | x/space: select | Ctrl+A: select all | y: approve | n: deny | Y/N: bulk | esc: close"),
 	}
 
 	maxWidth := m.inspectorContentWidth()
