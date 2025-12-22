@@ -147,7 +147,7 @@ The agent will be started in a new tmux pane in the workspace's session.`,
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient, agentServiceOptions(database)...)
 
 		// Find workspace
 		ws, err := findWorkspace(ctx, wsRepo, agentSpawnWorkspace)
@@ -194,6 +194,17 @@ The agent will be started in a new tmux pane in the workspace's session.`,
 			}
 			step.Done()
 			agents = append(agents, a)
+		}
+
+		if len(agents) > 0 && ws.TmuxSession != "" {
+			layoutManager := tmux.NewLayoutManager(
+				tmuxClient,
+				tmux.WithLayoutPreset(tmux.LayoutPresetTiled),
+				tmux.WithLayoutWindow(tmux.AgentWindowName),
+			)
+			if err := layoutManager.Balance(ctx, ws.TmuxSession); err != nil && !IsJSONOutput() && !IsJSONLOutput() {
+				fmt.Fprintf(os.Stderr, "Warning: failed to rebalance agent panes: %v\n", err)
+			}
 		}
 
 		if IsJSONOutput() || IsJSONLOutput() {
@@ -246,7 +257,7 @@ var agentListCmd = &cobra.Command{
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient, agentServiceOptions(database)...)
 
 		// Build options
 		opts := agent.ListAgentsOptions{
@@ -326,7 +337,7 @@ var agentStatusCmd = &cobra.Command{
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient, agentServiceOptions(database)...)
 
 		resolved, err := findAgent(ctx, agentRepo, agentID)
 		if err != nil {
@@ -417,7 +428,7 @@ var agentTerminateCmd = &cobra.Command{
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient, agentServiceOptions(database)...)
 
 		resolved, err := findAgent(ctx, agentRepo, agentID)
 		if err != nil {
@@ -469,7 +480,7 @@ var agentInterruptCmd = &cobra.Command{
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient, agentServiceOptions(database)...)
 
 		resolved, err := findAgent(ctx, agentRepo, agentID)
 		if err != nil {
@@ -523,7 +534,7 @@ var agentPauseCmd = &cobra.Command{
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient, agentServiceOptions(database)...)
 
 		resolved, err := findAgent(ctx, agentRepo, agentID)
 		if err != nil {
@@ -576,7 +587,7 @@ var agentResumeCmd = &cobra.Command{
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient, agentServiceOptions(database)...)
 
 		resolved, err := findAgent(ctx, agentRepo, agentID)
 		if err != nil {
@@ -643,7 +654,7 @@ Provide the message inline, or use --file, --stdin, or --editor to send multi-li
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient, agentServiceOptions(database)...)
 
 		opts := &agent.SendMessageOptions{
 			SkipIdleCheck: agentSendSkipIdle,
@@ -700,7 +711,7 @@ var agentRestartCmd = &cobra.Command{
 		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
 
 		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient)
+		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient, agentServiceOptions(database)...)
 
 		resolved, err := findAgent(ctx, agentRepo, agentID)
 		if err != nil {
