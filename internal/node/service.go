@@ -386,6 +386,79 @@ func ParseSSHTarget(target string) (user, host string, port int) {
 	return user, host, port
 }
 
+// ExecResult contains the result of executing a command on a node.
+type ExecResult struct {
+	Stdout   string
+	Stderr   string
+	ExitCode int
+	Error    string
+}
+
+// ExecCommand executes a command on a node and returns the result.
+func (s *Service) ExecCommand(ctx context.Context, node *models.Node, cmd string) (*ExecResult, error) {
+	if node.IsLocal {
+		// For local nodes, use system executor with localhost
+		executor := ssh.NewSystemExecutor(ssh.ConnectionOptions{})
+		stdout, stderr, err := executor.Exec(ctx, cmd)
+		result := &ExecResult{
+			Stdout:   string(stdout),
+			Stderr:   string(stderr),
+			ExitCode: 0,
+		}
+		if err != nil {
+			result.Error = err.Error()
+			// Try to extract exit code from error
+			var exitErr *ssh.ExitError
+			if errors.As(err, &exitErr) {
+				result.ExitCode = exitErr.Code
+			} else {
+				result.ExitCode = 1
+			}
+		}
+		return result, nil
+	}
+
+	// Parse SSH target
+	user, host, port := ParseSSHTarget(node.SSHTarget)
+
+	// Build connection options
+	opts := ssh.ConnectionOptions{
+		Host:    host,
+		Port:    port,
+		User:    user,
+		KeyPath: node.SSHKeyPath,
+		Timeout: s.DefaultTimeout,
+	}
+
+	// Create executor based on backend preference
+	executor, err := s.createExecutor(node.SSHBackend, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create SSH executor: %w", err)
+	}
+	defer executor.Close()
+
+	// Execute the command
+	stdout, stderr, execErr := executor.Exec(ctx, cmd)
+	result := &ExecResult{
+		Stdout:   string(stdout),
+		Stderr:   string(stderr),
+		ExitCode: 0,
+	}
+
+	if execErr != nil {
+		result.Error = execErr.Error()
+		// Try to extract exit code from error
+		var exitErr *ssh.ExitError
+		if errors.As(execErr, &exitErr) {
+			result.ExitCode = exitErr.Code
+		} else {
+			result.ExitCode = 1
+		}
+	}
+
+	return result, nil
+}
+
 // validateSSHTarget validates that an SSH target string is well-formed.
 func validateSSHTarget(target string) error {
 	if target == "" {

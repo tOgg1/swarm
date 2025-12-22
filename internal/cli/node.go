@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/opencode-ai/swarm/internal/db"
 	"github.com/opencode-ai/swarm/internal/models"
@@ -27,6 +29,9 @@ var (
 
 	// Node remove flags
 	nodeRemoveForce bool
+
+	// Node exec flags
+	nodeExecTimeout int
 )
 
 func init() {
@@ -37,6 +42,7 @@ func init() {
 	nodeCmd.AddCommand(nodeBootstrapCmd)
 	nodeCmd.AddCommand(nodeDoctorCmd)
 	nodeCmd.AddCommand(nodeRefreshCmd)
+	nodeCmd.AddCommand(nodeExecCmd)
 
 	// List flags
 	nodeListCmd.Flags().StringVar(&nodeStatus, "status", "", "filter by status (online, offline, unknown)")
@@ -51,6 +57,9 @@ func init() {
 
 	// Remove flags
 	nodeRemoveCmd.Flags().BoolVarP(&nodeRemoveForce, "force", "f", false, "force removal even with workspaces")
+
+	// Exec flags
+	nodeExecCmd.Flags().IntVar(&nodeExecTimeout, "timeout", 60, "command timeout in seconds")
 }
 
 var nodeCmd = &cobra.Command{
@@ -495,6 +504,142 @@ If no node is specified, refreshes all nodes.`,
 
 		if IsJSONOutput() || IsJSONLOutput() {
 			return WriteOutput(os.Stdout, results)
+		}
+
+		return nil
+	},
+}
+
+var nodeExecCmd = &cobra.Command{
+	Use:   "exec <name-or-id> -- <command>",
+	Short: "Execute command on node",
+	Long: `Execute an arbitrary command on a node and return the result.
+
+For remote nodes, the command is executed via SSH.
+For local nodes, the command is executed directly.
+
+The command must be specified after the -- separator.`,
+	Example: `  # Run a simple command
+  swarm node exec myserver -- uname -a
+
+  # Check disk space
+  swarm node exec prod-server -- df -h
+
+  # Run with timeout
+  swarm node exec staging --timeout 30 -- long-running-script.sh
+
+  # Get JSON output
+  swarm node exec myserver --json -- cat /etc/os-release`,
+	Args:               cobra.MinimumNArgs(1),
+	DisableFlagParsing: false,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := context.Background()
+
+		// Find the -- separator
+		dashIdx := -1
+		for i, arg := range args {
+			if arg == "--" {
+				dashIdx = i
+				break
+			}
+		}
+
+		// Handle cases where -- might be in os.Args but not in args
+		// (Cobra removes it if it's a standard flag separator)
+		var nameOrID string
+		var cmdArgs []string
+
+		if dashIdx == -1 {
+			// No -- found in args, check if command was provided
+			if len(args) < 2 {
+				return errors.New("command required: use -- to separate node from command")
+			}
+			nameOrID = args[0]
+			cmdArgs = args[1:]
+		} else {
+			if dashIdx == 0 {
+				return errors.New("node name required before --")
+			}
+			if dashIdx >= len(args)-1 {
+				return errors.New("command required after --")
+			}
+			nameOrID = args[0]
+			cmdArgs = args[dashIdx+1:]
+		}
+
+		if len(cmdArgs) == 0 {
+			return errors.New("command required")
+		}
+
+		// Build the command string
+		remoteCmd := strings.Join(cmdArgs, " ")
+
+		database, err := openDatabase()
+		if err != nil {
+			return err
+		}
+		defer database.Close()
+
+		repo := db.NewNodeRepository(database)
+		service := node.NewService(repo)
+
+		// Find node by name or ID
+		n, err := service.GetNodeByName(ctx, nameOrID)
+		if err != nil {
+			if errors.Is(err, node.ErrNodeNotFound) {
+				n, err = service.GetNode(ctx, nameOrID)
+				if err != nil {
+					return fmt.Errorf("node '%s' not found", nameOrID)
+				}
+			} else {
+				return fmt.Errorf("failed to get node: %w", err)
+			}
+		}
+
+		// Apply timeout
+		if nodeExecTimeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, time.Duration(nodeExecTimeout)*time.Second)
+			defer cancel()
+		}
+
+		// Execute command
+		result, err := service.ExecCommand(ctx, n, remoteCmd)
+		if err != nil {
+			return fmt.Errorf("failed to execute command: %w", err)
+		}
+
+		if IsJSONOutput() || IsJSONLOutput() {
+			return WriteOutput(os.Stdout, map[string]any{
+				"node_id":   n.ID,
+				"node_name": n.Name,
+				"command":   remoteCmd,
+				"stdout":    result.Stdout,
+				"stderr":    result.Stderr,
+				"exit_code": result.ExitCode,
+				"error":     result.Error,
+			})
+		}
+
+		// Print stdout
+		if result.Stdout != "" {
+			fmt.Print(result.Stdout)
+			if !strings.HasSuffix(result.Stdout, "\n") {
+				fmt.Println()
+			}
+		}
+
+		// Print stderr to stderr
+		if result.Stderr != "" {
+			fmt.Fprint(os.Stderr, result.Stderr)
+			if !strings.HasSuffix(result.Stderr, "\n") {
+				fmt.Fprintln(os.Stderr)
+			}
+		}
+
+		// Return error if non-zero exit
+		if result.ExitCode != 0 {
+			return fmt.Errorf("command exited with code %d", result.ExitCode)
 		}
 
 		return nil

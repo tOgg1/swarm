@@ -2,10 +2,13 @@
 package cli
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -13,6 +16,7 @@ import (
 	"github.com/opencode-ai/swarm/internal/db"
 	"github.com/opencode-ai/swarm/internal/models"
 	"github.com/opencode-ai/swarm/internal/node"
+	"github.com/opencode-ai/swarm/internal/queue"
 	"github.com/opencode-ai/swarm/internal/tmux"
 	"github.com/opencode-ai/swarm/internal/workspace"
 	"github.com/spf13/cobra"
@@ -39,6 +43,10 @@ var (
 
 	// agent send flags
 	agentSendSkipIdle bool
+
+	// agent queue flags
+	agentQueueFile       string
+	agentQueuePauseAfter int
 )
 
 func init() {
@@ -52,6 +60,7 @@ func init() {
 	agentCmd.AddCommand(agentResumeCmd)
 	agentCmd.AddCommand(agentSendCmd)
 	agentCmd.AddCommand(agentRestartCmd)
+	agentCmd.AddCommand(agentQueueCmd)
 
 	// Spawn flags
 	agentSpawnCmd.Flags().StringVarP(&agentSpawnWorkspace, "workspace", "w", "", "workspace name or ID (required)")
@@ -74,6 +83,10 @@ func init() {
 
 	// Send flags
 	agentSendCmd.Flags().BoolVar(&agentSendSkipIdle, "skip-idle-check", false, "send even if agent is not idle")
+
+	// Queue flags
+	agentQueueCmd.Flags().StringVarP(&agentQueueFile, "file", "f", "", "file containing prompts (one per line)")
+	agentQueueCmd.Flags().IntVar(&agentQueuePauseAfter, "pause-after", 0, "insert 60s pause after every N messages (0 = no pauses)")
 }
 
 var agentCmd = &cobra.Command{
@@ -633,6 +646,184 @@ var agentRestartCmd = &cobra.Command{
 		fmt.Printf("  New ID: %s\n", newAgent.ID)
 		fmt.Printf("  Pane:   %s\n", newAgent.TmuxPane)
 		fmt.Printf("  State:  %s\n", newAgent.State)
+		return nil
+	},
+}
+
+var agentQueueCmd = &cobra.Command{
+	Use:   "queue <agent-id> [messages...]",
+	Short: "Queue messages for an agent",
+	Long: `Queue one or more messages for an agent.
+
+Messages can be provided as arguments or from a file (one per line).
+Special markers in the file:
+  #PAUSE          - Insert a 60s pause
+  #PAUSE:120      - Insert a 120s pause
+  #                - Comment line (ignored)
+  (blank lines)   - Ignored`,
+	Example: `  # Queue a single message
+  swarm agent queue abc123 "Fix the bug"
+
+  # Queue multiple messages
+  swarm agent queue abc123 "First task" "Second task" "Third task"
+
+  # Queue from a file
+  swarm agent queue abc123 --file prompts.txt
+
+  # Auto-insert pauses every 5 messages
+  swarm agent queue abc123 --file prompts.txt --pause-after 5`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := context.Background()
+		agentID := args[0]
+
+		database, err := openDatabase()
+		if err != nil {
+			return err
+		}
+		defer database.Close()
+
+		agentRepo := db.NewAgentRepository(database)
+		queueRepo := db.NewQueueRepository(database)
+		queueService := queue.NewService(queueRepo)
+
+		// Verify agent exists
+		a, err := agentRepo.Get(ctx, agentID)
+		if err != nil {
+			if errors.Is(err, db.ErrAgentNotFound) {
+				return fmt.Errorf("agent '%s' not found", agentID)
+			}
+			return fmt.Errorf("failed to get agent: %w", err)
+		}
+
+		// Collect messages
+		var messages []string
+
+		if agentQueueFile != "" {
+			// Read from file
+			file, err := os.Open(agentQueueFile)
+			if err != nil {
+				return fmt.Errorf("failed to open file: %w", err)
+			}
+			defer file.Close()
+
+			scanner := bufio.NewScanner(file)
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if line == "" {
+					continue // Skip blank lines
+				}
+				if strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "#PAUSE") {
+					continue // Skip comments (but not pause markers)
+				}
+				messages = append(messages, line)
+			}
+			if err := scanner.Err(); err != nil {
+				return fmt.Errorf("failed to read file: %w", err)
+			}
+		}
+
+		// Add CLI arguments as messages
+		if len(args) > 1 {
+			messages = append(messages, args[1:]...)
+		}
+
+		if len(messages) == 0 {
+			return errors.New("no messages to queue (provide arguments or use --file)")
+		}
+
+		// Build queue items
+		var items []*models.QueueItem
+		messageCount := 0
+
+		for _, msg := range messages {
+			// Check for pause markers
+			if strings.HasPrefix(msg, "#PAUSE") {
+				pauseSecs := 60 // default
+				if strings.HasPrefix(msg, "#PAUSE:") {
+					var duration int
+					if _, err := fmt.Sscanf(msg, "#PAUSE:%d", &duration); err == nil && duration > 0 {
+						pauseSecs = duration
+					}
+				}
+
+				payload := models.PausePayload{
+					DurationSeconds: pauseSecs,
+					Reason:          "scheduled pause from queue file",
+				}
+				payloadBytes, _ := json.Marshal(payload)
+
+				items = append(items, &models.QueueItem{
+					AgentID: a.ID,
+					Type:    models.QueueItemTypePause,
+					Status:  models.QueueItemStatusPending,
+					Payload: payloadBytes,
+				})
+				continue
+			}
+
+			// Regular message
+			payload := models.MessagePayload{Text: msg}
+			payloadBytes, _ := json.Marshal(payload)
+
+			items = append(items, &models.QueueItem{
+				AgentID: a.ID,
+				Type:    models.QueueItemTypeMessage,
+				Status:  models.QueueItemStatusPending,
+				Payload: payloadBytes,
+			})
+
+			messageCount++
+
+			// Insert auto-pause if configured
+			if agentQueuePauseAfter > 0 && messageCount%agentQueuePauseAfter == 0 {
+				pausePayload := models.PausePayload{
+					DurationSeconds: 60,
+					Reason:          fmt.Sprintf("auto-pause after %d messages", agentQueuePauseAfter),
+				}
+				pauseBytes, _ := json.Marshal(pausePayload)
+
+				items = append(items, &models.QueueItem{
+					AgentID: a.ID,
+					Type:    models.QueueItemTypePause,
+					Status:  models.QueueItemStatusPending,
+					Payload: pauseBytes,
+				})
+			}
+		}
+
+		// Enqueue all items
+		if err := queueService.Enqueue(ctx, a.ID, items...); err != nil {
+			return fmt.Errorf("failed to enqueue items: %w", err)
+		}
+
+		// Count item types for output
+		msgCount := 0
+		pauseCount := 0
+		for _, item := range items {
+			switch item.Type {
+			case models.QueueItemTypeMessage:
+				msgCount++
+			case models.QueueItemTypePause:
+				pauseCount++
+			}
+		}
+
+		if IsJSONOutput() || IsJSONLOutput() {
+			return WriteOutput(os.Stdout, map[string]any{
+				"queued":      true,
+				"agent_id":    a.ID,
+				"messages":    msgCount,
+				"pauses":      pauseCount,
+				"total_items": len(items),
+			})
+		}
+
+		fmt.Printf("Queued %d items for agent '%s':\n", len(items), truncate(a.ID, 12))
+		fmt.Printf("  Messages: %d\n", msgCount)
+		if pauseCount > 0 {
+			fmt.Printf("  Pauses:   %d\n", pauseCount)
+		}
 		return nil
 	},
 }
