@@ -124,6 +124,18 @@ func (r *WorkspaceRepository) GetByTmuxSession(ctx context.Context, nodeID, sess
 	return r.scanWorkspace(row)
 }
 
+// GetByName retrieves a workspace by name.
+func (r *WorkspaceRepository) GetByName(ctx context.Context, name string) (*models.Workspace, error) {
+	row := r.db.QueryRowContext(ctx, `
+		SELECT 
+			id, name, node_id, repo_path, tmux_session, status,
+			git_info_json, created_at, updated_at
+		FROM workspaces WHERE name = ?
+	`, name)
+
+	return r.scanWorkspace(row)
+}
+
 // List retrieves all workspaces.
 func (r *WorkspaceRepository) List(ctx context.Context) ([]*models.Workspace, error) {
 	rows, err := r.db.QueryContext(ctx, `
