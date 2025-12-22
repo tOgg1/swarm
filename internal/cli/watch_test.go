@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -527,5 +529,182 @@ func TestEventStreamer_IncludeExisting(t *testing.T) {
 	lines := bytes.Count(buf.Bytes(), []byte("\n"))
 	if lines < 3 {
 		t.Errorf("expected at least 3 events, got %d lines", lines)
+	}
+}
+
+func TestDefaultReconnectConfig(t *testing.T) {
+	cfg := DefaultReconnectConfig()
+
+	if !cfg.Enabled {
+		t.Error("expected Enabled to be true by default")
+	}
+	if cfg.MaxAttempts != 0 {
+		t.Errorf("expected MaxAttempts 0 (unlimited), got %d", cfg.MaxAttempts)
+	}
+	if cfg.InitialBackoff != 1*time.Second {
+		t.Errorf("expected InitialBackoff 1s, got %v", cfg.InitialBackoff)
+	}
+	if cfg.MaxBackoff != 30*time.Second {
+		t.Errorf("expected MaxBackoff 30s, got %v", cfg.MaxBackoff)
+	}
+	if cfg.BackoffMultiplier != 2.0 {
+		t.Errorf("expected BackoffMultiplier 2.0, got %f", cfg.BackoffMultiplier)
+	}
+}
+
+func TestConnectionStatus_String(t *testing.T) {
+	if ConnectionStatusConnected != "connected" {
+		t.Error("ConnectionStatusConnected mismatch")
+	}
+	if ConnectionStatusReconnecting != "reconnecting" {
+		t.Error("ConnectionStatusReconnecting mismatch")
+	}
+	if ConnectionStatusDisconnected != "disconnected" {
+		t.Error("ConnectionStatusDisconnected mismatch")
+	}
+}
+
+func TestEventStreamer_StatusCallback(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	repo := db.NewEventRepository(database)
+	ctx := context.Background()
+
+	// Track status changes
+	var statusChanges []ConnectionStatus
+	var mu sync.Mutex
+
+	config := DefaultStreamConfig()
+	config.PollInterval = 10 * time.Millisecond
+	config.Reconnect.OnStatusChange = func(status ConnectionStatus, attempt int, nextRetry time.Duration, err error) {
+		mu.Lock()
+		statusChanges = append(statusChanges, status)
+		mu.Unlock()
+	}
+
+	var buf bytes.Buffer
+	streamer := NewEventStreamer(repo, &buf, config)
+
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+
+	err := streamer.Stream(ctxWithTimeout)
+	if err != nil {
+		t.Errorf("Stream error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Should have at least connected and disconnected status
+	if len(statusChanges) < 2 {
+		t.Errorf("expected at least 2 status changes, got %d", len(statusChanges))
+	}
+
+	// First status should be connected
+	if len(statusChanges) > 0 && statusChanges[0] != ConnectionStatusConnected {
+		t.Errorf("expected first status to be connected, got %v", statusChanges[0])
+	}
+
+	// Last status should be disconnected (graceful shutdown)
+	if len(statusChanges) > 0 && statusChanges[len(statusChanges)-1] != ConnectionStatusDisconnected {
+		t.Errorf("expected last status to be disconnected, got %v", statusChanges[len(statusChanges)-1])
+	}
+}
+
+func TestEventStreamer_CalculateBackoff(t *testing.T) {
+	config := DefaultStreamConfig()
+	config.Reconnect = ReconnectConfig{
+		InitialBackoff:    100 * time.Millisecond,
+		MaxBackoff:        1 * time.Second,
+		BackoffMultiplier: 2.0,
+	}
+
+	var buf bytes.Buffer
+	streamer := NewEventStreamer(nil, &buf, config)
+
+	tests := []struct {
+		attempt  int
+		current  time.Duration
+		expected time.Duration
+	}{
+		{1, 0, 100 * time.Millisecond},                      // First attempt uses initial backoff
+		{2, 100 * time.Millisecond, 200 * time.Millisecond}, // 100ms * 2
+		{3, 200 * time.Millisecond, 400 * time.Millisecond}, // 200ms * 2
+		{4, 400 * time.Millisecond, 800 * time.Millisecond}, // 400ms * 2
+		{5, 800 * time.Millisecond, 1 * time.Second},        // Would be 1600ms, but capped at 1s
+		{6, 1 * time.Second, 1 * time.Second},               // Already at max
+	}
+
+	for _, tt := range tests {
+		got := streamer.calculateBackoff(tt.attempt, tt.current)
+		if got != tt.expected {
+			t.Errorf("calculateBackoff(attempt=%d, current=%v) = %v, want %v",
+				tt.attempt, tt.current, got, tt.expected)
+		}
+	}
+}
+
+func TestEventStreamer_ReconnectDisabled(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Create a repo that will fail (closed database)
+	_ = database.Close() // Close immediately
+	repo := db.NewEventRepository(database)
+
+	config := DefaultStreamConfig()
+	config.PollInterval = 10 * time.Millisecond
+	config.Reconnect.Enabled = false // Disable reconnection
+
+	var buf bytes.Buffer
+	streamer := NewEventStreamer(repo, &buf, config)
+
+	ctx := context.Background()
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+
+	err := streamer.Stream(ctxWithTimeout)
+
+	// Should get an error since reconnect is disabled
+	if err == nil {
+		t.Error("expected error when reconnect is disabled and poll fails")
+	}
+}
+
+func TestEventStreamer_ReconnectMaxAttempts(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Close the database to simulate failures
+	_ = database.Close()
+	repo := db.NewEventRepository(database)
+
+	config := DefaultStreamConfig()
+	config.PollInterval = 10 * time.Millisecond
+	config.Reconnect = ReconnectConfig{
+		Enabled:           true,
+		MaxAttempts:       3, // Limit to 3 attempts
+		InitialBackoff:    10 * time.Millisecond,
+		MaxBackoff:        50 * time.Millisecond,
+		BackoffMultiplier: 2.0,
+	}
+
+	var buf bytes.Buffer
+	streamer := NewEventStreamer(repo, &buf, config)
+
+	ctx := context.Background()
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+
+	err := streamer.Stream(ctxWithTimeout)
+
+	// Should get an error about max attempts exceeded
+	if err == nil {
+		t.Error("expected error when max attempts exceeded")
+	}
+	if !strings.Contains(err.Error(), "max reconnection attempts") {
+		t.Errorf("expected max attempts error, got: %v", err)
 	}
 }

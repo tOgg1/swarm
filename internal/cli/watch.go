@@ -16,6 +16,53 @@ import (
 	"github.com/opencode-ai/swarm/internal/models"
 )
 
+// ConnectionStatus represents the current state of the event stream connection.
+type ConnectionStatus string
+
+const (
+	// ConnectionStatusConnected indicates the stream is actively receiving events.
+	ConnectionStatusConnected ConnectionStatus = "connected"
+	// ConnectionStatusReconnecting indicates the stream is attempting to reconnect.
+	ConnectionStatusReconnecting ConnectionStatus = "reconnecting"
+	// ConnectionStatusDisconnected indicates the stream has permanently disconnected.
+	ConnectionStatusDisconnected ConnectionStatus = "disconnected"
+)
+
+// StatusCallback is called when the connection status changes.
+type StatusCallback func(status ConnectionStatus, attempt int, nextRetry time.Duration, err error)
+
+// ReconnectConfig configures reconnection behavior for event streams.
+type ReconnectConfig struct {
+	// Enabled enables automatic reconnection on errors.
+	Enabled bool
+
+	// MaxAttempts is the maximum number of reconnection attempts (0 = unlimited).
+	MaxAttempts int
+
+	// InitialBackoff is the initial delay before first retry.
+	InitialBackoff time.Duration
+
+	// MaxBackoff is the maximum delay between retries.
+	MaxBackoff time.Duration
+
+	// BackoffMultiplier is the factor by which backoff increases each retry.
+	BackoffMultiplier float64
+
+	// OnStatusChange is called when connection status changes.
+	OnStatusChange StatusCallback
+}
+
+// DefaultReconnectConfig returns sensible defaults for reconnection.
+func DefaultReconnectConfig() ReconnectConfig {
+	return ReconnectConfig{
+		Enabled:           true,
+		MaxAttempts:       0, // unlimited
+		InitialBackoff:    1 * time.Second,
+		MaxBackoff:        30 * time.Second,
+		BackoffMultiplier: 2.0,
+	}
+}
+
 // StreamConfig configures event streaming behavior.
 type StreamConfig struct {
 	// PollInterval is how often to check for new events.
@@ -38,6 +85,9 @@ type StreamConfig struct {
 
 	// BatchSize is the max events per poll.
 	BatchSize int
+
+	// Reconnect configures automatic reconnection behavior.
+	Reconnect ReconnectConfig
 }
 
 // DefaultStreamConfig returns sensible defaults for streaming.
@@ -46,6 +96,7 @@ func DefaultStreamConfig() StreamConfig {
 		PollInterval:    500 * time.Millisecond,
 		IncludeExisting: false,
 		BatchSize:       100,
+		Reconnect:       DefaultReconnectConfig(),
 	}
 }
 
@@ -79,6 +130,7 @@ func NewEventStreamer(repo *db.EventRepository, out io.Writer, config StreamConf
 
 // Stream starts streaming events until the context is cancelled.
 // Returns nil on graceful shutdown (Ctrl+C), error otherwise.
+// If reconnection is enabled, temporary errors will trigger automatic retries.
 func (s *EventStreamer) Stream(ctx context.Context) error {
 	// Set up signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(ctx)
@@ -112,18 +164,59 @@ func (s *EventStreamer) Stream(ctx context.Context) error {
 	defer ticker.Stop()
 
 	s.logger("Starting event stream (poll interval: %v)", s.config.PollInterval)
+	s.notifyStatus(ConnectionStatusConnected, 0, 0, nil)
+
+	// Track reconnection state
+	var consecutiveErrors int
+	var currentBackoff time.Duration
 
 	for {
 		select {
 		case <-ctx.Done():
+			s.notifyStatus(ConnectionStatusDisconnected, 0, 0, nil)
 			return nil
 		case <-ticker.C:
 			events, nextCursor, err := s.poll(ctx, cursor, since)
 			if err != nil {
 				if ctx.Err() != nil {
+					s.notifyStatus(ConnectionStatusDisconnected, 0, 0, nil)
 					return nil // Context cancelled, graceful shutdown
 				}
-				return fmt.Errorf("failed to poll events: %w", err)
+
+				// Handle error with reconnection logic
+				if !s.config.Reconnect.Enabled {
+					s.notifyStatus(ConnectionStatusDisconnected, 0, 0, err)
+					return fmt.Errorf("failed to poll events: %w", err)
+				}
+
+				consecutiveErrors++
+
+				// Check max attempts
+				if s.config.Reconnect.MaxAttempts > 0 && consecutiveErrors > s.config.Reconnect.MaxAttempts {
+					s.notifyStatus(ConnectionStatusDisconnected, consecutiveErrors, 0, err)
+					return fmt.Errorf("max reconnection attempts (%d) exceeded: %w", s.config.Reconnect.MaxAttempts, err)
+				}
+
+				// Calculate backoff
+				currentBackoff = s.calculateBackoff(consecutiveErrors, currentBackoff)
+				s.notifyStatus(ConnectionStatusReconnecting, consecutiveErrors, currentBackoff, err)
+				s.logger("Poll failed (attempt %d), retrying in %v: %v", consecutiveErrors, currentBackoff, err)
+
+				// Wait before retrying
+				if err := s.sleepWithContext(ctx, currentBackoff); err != nil {
+					s.notifyStatus(ConnectionStatusDisconnected, consecutiveErrors, 0, nil)
+					return nil // Context cancelled during backoff
+				}
+
+				continue
+			}
+
+			// Reset error state on successful poll
+			if consecutiveErrors > 0 {
+				s.logger("Reconnected successfully after %d attempts", consecutiveErrors)
+				s.notifyStatus(ConnectionStatusConnected, 0, 0, nil)
+				consecutiveErrors = 0
+				currentBackoff = 0
 			}
 
 			for _, event := range events {
@@ -137,6 +230,42 @@ func (s *EventStreamer) Stream(ctx context.Context) error {
 				since = nil // Use cursor-based pagination after first batch
 			}
 		}
+	}
+}
+
+// calculateBackoff computes the next backoff duration using exponential backoff.
+func (s *EventStreamer) calculateBackoff(attempt int, current time.Duration) time.Duration {
+	rc := s.config.Reconnect
+
+	if current == 0 {
+		return rc.InitialBackoff
+	}
+
+	next := time.Duration(float64(current) * rc.BackoffMultiplier)
+	if next > rc.MaxBackoff {
+		next = rc.MaxBackoff
+	}
+
+	return next
+}
+
+// sleepWithContext sleeps for the given duration or until context is cancelled.
+func (s *EventStreamer) sleepWithContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// notifyStatus calls the status callback if configured.
+func (s *EventStreamer) notifyStatus(status ConnectionStatus, attempt int, nextRetry time.Duration, err error) {
+	if s.config.Reconnect.OnStatusChange != nil {
+		s.config.Reconnect.OnStatusChange(status, attempt, nextRetry, err)
 	}
 }
 
