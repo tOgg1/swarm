@@ -8,6 +8,9 @@ type Styles struct {
 	Text         lipgloss.Style
 	Muted        lipgloss.Style
 	Accent       lipgloss.Style
+	Panel        lipgloss.Style
+	Border       lipgloss.Style
+	Focus        lipgloss.Style
 	Success      lipgloss.Style
 	Warning      lipgloss.Style
 	Error        lipgloss.Style
@@ -32,6 +35,9 @@ func BuildStyles(theme Theme) Styles {
 		Text:         lipgloss.NewStyle().Foreground(lipgloss.Color(tokens.Text)),
 		Muted:        lipgloss.NewStyle().Foreground(lipgloss.Color(tokens.TextMuted)),
 		Accent:       lipgloss.NewStyle().Foreground(lipgloss.Color(tokens.Accent)),
+		Panel:        lipgloss.NewStyle().Foreground(lipgloss.Color(tokens.Text)).Background(lipgloss.Color(tokens.Panel)).BorderStyle(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color(tokens.Border)),
+		Border:       lipgloss.NewStyle().Foreground(lipgloss.Color(tokens.Border)),
+		Focus:        lipgloss.NewStyle().Foreground(lipgloss.Color(tokens.Focus)).Bold(true),
 		Success:      lipgloss.NewStyle().Foreground(lipgloss.Color(tokens.Success)),
 		Warning:      lipgloss.NewStyle().Foreground(lipgloss.Color(tokens.Warning)),
 		Error:        lipgloss.NewStyle().Foreground(lipgloss.Color(tokens.Error)),
