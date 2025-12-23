@@ -613,6 +613,21 @@ Use --destroy to also kill the tmux session.`,
 			return fmt.Errorf("workspace has %d agents; use --force to remove anyway", ws.AgentCount)
 		}
 
+		// Confirm destructive action
+		var impact string
+		if wsRemoveDestroy {
+			impact = "This will remove the workspace record and kill the tmux session."
+		} else {
+			impact = "This will remove the workspace record. The tmux session will be left running."
+		}
+		if ws.AgentCount > 0 {
+			impact += fmt.Sprintf(" %d agent(s) will be orphaned.", ws.AgentCount)
+		}
+		if !ConfirmDestructiveAction("workspace", ws.Name, impact) {
+			fmt.Fprintln(os.Stderr, "Cancelled.")
+			return nil
+		}
+
 		if wsRemoveDestroy {
 			if err := wsService.DestroyWorkspace(ctx, ws.ID); err != nil {
 				return fmt.Errorf("failed to destroy workspace: %w", err)
@@ -681,6 +696,16 @@ and removing the Swarm record.`,
 
 		if len(agents) > 0 && !wsKillForce {
 			return fmt.Errorf("workspace has %d agents; use --force to kill anyway", len(agents))
+		}
+
+		// Confirm destructive action
+		impact := "This will terminate all agents, kill the tmux session, and remove the workspace."
+		if len(agents) > 0 {
+			impact = fmt.Sprintf("This will terminate %d agent(s), kill the tmux session, and remove the workspace.", len(agents))
+		}
+		if !ConfirmDestructiveAction("workspace", ws.Name, impact) {
+			fmt.Fprintln(os.Stderr, "Cancelled.")
+			return nil
 		}
 
 		for _, agentRecord := range agents {

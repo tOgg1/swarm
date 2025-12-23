@@ -155,6 +155,11 @@ The agent will be started in a new tmux pane in the workspace's session.`,
 			return err
 		}
 
+		approvalPolicy := ""
+		if cfg := GetConfig(); cfg != nil {
+			approvalPolicy = cfg.ApprovalPolicyForWorkspace(ws).Mode
+		}
+
 		// Parse agent type
 		agentType := models.AgentType(agentSpawnType)
 		switch agentType {
@@ -169,10 +174,11 @@ The agent will be started in a new tmux pane in the workspace's session.`,
 		var agents []*models.Agent
 		for i := 0; i < agentSpawnCount; i++ {
 			opts := agent.SpawnOptions{
-				WorkspaceID:   ws.ID,
-				Type:          agentType,
-				AccountID:     agentSpawnProfile,
-				InitialPrompt: agentSpawnPrompt,
+				WorkspaceID:    ws.ID,
+				Type:           agentType,
+				AccountID:      agentSpawnProfile,
+				InitialPrompt:  agentSpawnPrompt,
+				ApprovalPolicy: approvalPolicy,
 			}
 			// If --no-wait is set, use a very short timeout to skip waiting
 			if agentSpawnNoWait {
@@ -433,6 +439,13 @@ var agentTerminateCmd = &cobra.Command{
 		resolved, err := findAgent(ctx, agentRepo, agentID)
 		if err != nil {
 			return err
+		}
+
+		// Confirm destructive action
+		impact := "This will kill the tmux pane and remove the agent record."
+		if !ConfirmDestructiveAction("agent", resolved.ID, impact) {
+			fmt.Fprintln(os.Stderr, "Cancelled.")
+			return nil
 		}
 
 		step := startProgress("Terminating agent")

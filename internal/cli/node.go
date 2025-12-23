@@ -231,6 +231,16 @@ This does not stop agents running on the node.`,
 			return fmt.Errorf("node has %d agents; use --force to remove anyway", n.AgentCount)
 		}
 
+		// Confirm destructive action
+		impact := "This will unregister the node from the swarm."
+		if n.AgentCount > 0 {
+			impact = fmt.Sprintf("This will unregister the node and orphan %d agent(s).", n.AgentCount)
+		}
+		if !ConfirmDestructiveAction("node", n.Name, impact) {
+			fmt.Fprintln(os.Stderr, "Cancelled.")
+			return nil
+		}
+
 		if err := service.RemoveNode(ctx, n.ID); err != nil {
 			return fmt.Errorf("failed to remove node: %w", err)
 		}
