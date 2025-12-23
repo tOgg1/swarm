@@ -24,6 +24,8 @@ const tuiSubscriberID = "tui-main"
 type Config struct {
 	// StateEngine for subscribing to state changes.
 	StateEngine *state.Engine
+	// Theme is the color theme name (default, high-contrast).
+	Theme string
 }
 
 // Run launches the Swarm TUI program.
@@ -35,6 +37,13 @@ func Run() error {
 func RunWithConfig(cfg Config) error {
 	m := initialModel()
 	m.stateEngine = cfg.StateEngine
+
+	// Apply theme from config
+	if cfg.Theme != "" {
+		if theme, ok := styles.Themes[cfg.Theme]; ok {
+			m.styles = styles.BuildStyles(theme)
+		}
+	}
 
 	program := tea.NewProgram(m, tea.WithAltScreen())
 
@@ -779,7 +788,8 @@ func (m *model) viewLines() []string {
 		if m.workspaceGrid != nil {
 			lines = append(lines, m.workspaceGrid.Render(m.styles))
 		} else {
-			lines = append(lines, m.styles.Muted.Render("No workspaces. Use 'swarm ws create' to create one."))
+			emptyState := components.EmptyWorkspaces()
+			lines = append(lines, emptyState.Render(m.styles))
 		}
 		inspectorTitle := "Workspace inspector"
 		if m.approvalsOpen {
@@ -828,9 +838,11 @@ func (m *model) viewLines() []string {
 		cards := m.agentCards()
 		if len(cards) == 0 {
 			if strings.TrimSpace(m.agentFilter) != "" {
-				lines = append(lines, m.styles.Warning.Render("No agents match filter. Press / to edit."))
+				emptyState := components.EmptyAgentsFiltered(m.agentFilter)
+				lines = append(lines, emptyState.Render(m.styles))
 			} else if len(m.agentStates) == 0 {
-				lines = append(lines, m.styles.Muted.Render("Sample data (no agents tracked yet)."))
+				emptyState := components.EmptyAgents()
+				lines = append(lines, emptyState.Render(m.styles))
 			} else {
 				lines = append(lines, m.styles.Muted.Render("No agents available."))
 			}
@@ -2543,8 +2555,8 @@ func (m model) renderNodesPanel(width int) string {
 	lines := []string{m.nodeHeaderRow(contentWidth)}
 
 	if len(m.nodes) == 0 {
-		lines = append(lines, m.styles.Muted.Render("No nodes registered yet."))
-		lines = append(lines, m.styles.Muted.Render("Run `swarm node add`."))
+		emptyState := components.EmptyNodes()
+		lines = append(lines, emptyState.Render(m.styles))
 	} else {
 		for _, node := range m.nodes {
 			lines = append(lines, m.nodeRow(contentWidth, node))
