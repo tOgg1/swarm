@@ -130,3 +130,161 @@ func TestServerCapturePaneNotFound(t *testing.T) {
 		t.Error("CapturePane() should return error for nonexistent agent")
 	}
 }
+
+func TestDetectAgentState(t *testing.T) {
+	server := NewServer(zerolog.Nop())
+
+	tests := []struct {
+		name    string
+		content string
+		want    swarmdv1.AgentState
+	}{
+		{
+			name:    "waiting for approval with y/n",
+			content: "Do you want to proceed? [y/n]",
+			want:    swarmdv1.AgentState_AGENT_STATE_WAITING_APPROVAL,
+		},
+		{
+			name:    "waiting for approval with confirm",
+			content: "Please confirm this action",
+			want:    swarmdv1.AgentState_AGENT_STATE_WAITING_APPROVAL,
+		},
+		{
+			name:    "idle with prompt",
+			content: "some output\n$",
+			want:    swarmdv1.AgentState_AGENT_STATE_IDLE,
+		},
+		{
+			name:    "idle with arrow prompt",
+			content: "done\n❯",
+			want:    swarmdv1.AgentState_AGENT_STATE_IDLE,
+		},
+		{
+			name:    "running with spinner",
+			content: "⠋ Processing...",
+			want:    swarmdv1.AgentState_AGENT_STATE_RUNNING,
+		},
+		{
+			name:    "running with thinking",
+			content: "Thinking...",
+			want:    swarmdv1.AgentState_AGENT_STATE_RUNNING,
+		},
+		{
+			name:    "failed with error",
+			content: "error: something went wrong",
+			want:    swarmdv1.AgentState_AGENT_STATE_FAILED,
+		},
+		{
+			name:    "failed with panic",
+			content: "panic: runtime error",
+			want:    swarmdv1.AgentState_AGENT_STATE_FAILED,
+		},
+		{
+			name:    "default to running",
+			content: "some random output",
+			want:    swarmdv1.AgentState_AGENT_STATE_RUNNING,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := server.detectAgentState(tt.content, "")
+			if got != tt.want {
+				t.Errorf("detectAgentState() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContainsAny(t *testing.T) {
+	tests := []struct {
+		name    string
+		s       string
+		substrs []string
+		want    bool
+	}{
+		{
+			name:    "contains first",
+			s:       "hello world",
+			substrs: []string{"hello", "foo"},
+			want:    true,
+		},
+		{
+			name:    "contains second",
+			s:       "hello world",
+			substrs: []string{"foo", "world"},
+			want:    true,
+		},
+		{
+			name:    "contains none",
+			s:       "hello world",
+			substrs: []string{"foo", "bar"},
+			want:    false,
+		},
+		{
+			name:    "empty string",
+			s:       "",
+			substrs: []string{"foo"},
+			want:    false,
+		},
+		{
+			name:    "empty substrs",
+			s:       "hello",
+			substrs: []string{},
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := containsAny(tt.s, tt.substrs...)
+			if got != tt.want {
+				t.Errorf("containsAny() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSplitLines(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    []string
+	}{
+		{
+			name:    "single line",
+			content: "hello",
+			want:    []string{"hello"},
+		},
+		{
+			name:    "multiple lines",
+			content: "line1\nline2\nline3",
+			want:    []string{"line1", "line2", "line3"},
+		},
+		{
+			name:    "trailing newline",
+			content: "line1\nline2\n",
+			want:    []string{"line1", "line2", ""},
+		},
+		{
+			name:    "empty string",
+			content: "",
+			want:    nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := splitLines(tt.content)
+			if len(got) != len(tt.want) {
+				t.Errorf("splitLines() len = %d, want %d", len(got), len(tt.want))
+				return
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("splitLines()[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
