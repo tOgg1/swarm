@@ -391,11 +391,11 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for more solutions.
 ### v0.2
 - [x] swarmd daemon
 - [x] Resource caps enforcement
-- [ ] Approvals inbox
-- [ ] Account rotation
+- [x] Approvals inbox (TUI integration)
+- [x] Account rotation
 
 ### v1.0
-- [ ] Multi-node workspaces
+- [ ] Distributed workspaces (single workspace across multiple nodes)
 - [ ] Recipes/roles system
 - [ ] Worktree isolation
 - [ ] Supervisor AI mode
