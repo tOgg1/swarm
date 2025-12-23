@@ -527,6 +527,8 @@ func ProviderEnvVar(provider models.Provider) string {
 //   - env:VAR_NAME - reads from environment variable VAR_NAME
 //   - $VAR_NAME or ${VAR_NAME} - reads from environment variable VAR_NAME
 //   - file:/path/to/file - reads from file
+//   - vault:adapter/profile - reads from native Swarm vault (recommended)
+//   - caam:provider/email - reads from legacy caam vault (deprecated)
 //   - literal value - used as-is (not recommended for production)
 func ResolveCredential(credentialRef string) (string, error) {
 	if credentialRef == "" {
@@ -571,13 +573,114 @@ func ResolveCredential(credentialRef string) (string, error) {
 		return strings.TrimSpace(string(data)), nil
 	}
 
-	// Check for caam: prefix (coding_agent_account_manager vault)
+	// Check for vault: prefix (native Swarm vault - recommended)
+	if strings.HasPrefix(credentialRef, "vault:") {
+		return resolveVaultCredential(strings.TrimPrefix(credentialRef, "vault:"))
+	}
+
+	// Check for caam: prefix (coding_agent_account_manager vault - deprecated)
 	if strings.HasPrefix(credentialRef, "caam:") {
 		return resolveCaamCredential(strings.TrimPrefix(credentialRef, "caam:"))
 	}
 
 	// Treat as literal value (for backwards compatibility)
 	return credentialRef, nil
+}
+
+// resolveVaultCredential resolves a credential from the native Swarm vault.
+// The ref format is "adapter/profile", e.g., "claude/work" or "anthropic/personal".
+func resolveVaultCredential(ref string) (string, error) {
+	parts := strings.SplitN(ref, "/", 2)
+	if len(parts) != 2 {
+		return "", errors.New("invalid vault credential reference format: expected adapter/profile")
+	}
+	adapterName := parts[0]
+	profileName := parts[1]
+
+	// Import vault package functions inline to avoid circular dependency
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", errors.New("failed to determine home directory: " + err.Error())
+	}
+	vaultPath := filepath.Join(home, ".config", "swarm", "vault")
+
+	// Map adapter name to provider directory
+	var providerDir string
+	switch strings.ToLower(adapterName) {
+	case "claude", "anthropic":
+		providerDir = "anthropic"
+	case "codex", "openai":
+		providerDir = "openai"
+	case "gemini", "google":
+		providerDir = "google"
+	case "opencode":
+		providerDir = "opencode"
+	default:
+		return "", errors.New("unknown adapter: " + adapterName)
+	}
+
+	profilePath := filepath.Join(vaultPath, "profiles", providerDir, profileName)
+
+	// Check if profile exists
+	info, err := os.Stat(profilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", errors.New("vault profile not found: " + ref + " (run 'swarm vault backup " + adapterName + " " + profileName + "' first)")
+		}
+		return "", errors.New("failed to access vault profile: " + err.Error())
+	}
+	if !info.IsDir() {
+		return "", errors.New("vault profile path is not a directory: " + ref)
+	}
+
+	// Try to read auth files and extract API key
+	var authFiles []string
+	switch providerDir {
+	case "anthropic":
+		authFiles = []string{".claude.json", "auth.json"}
+	case "openai":
+		authFiles = []string{"auth.json"}
+	case "google":
+		authFiles = []string{"settings.json"}
+	case "opencode":
+		authFiles = []string{"auth.json"}
+	}
+
+	// Try each auth file
+	for _, authFile := range authFiles {
+		authPath := filepath.Join(profilePath, authFile)
+		data, err := os.ReadFile(authPath)
+		if err != nil {
+			continue // Try next file
+		}
+
+		// Parse JSON to extract API key/token
+		var authData map[string]interface{}
+		if err := json.Unmarshal(data, &authData); err != nil {
+			continue // Try next file
+		}
+
+		// Look for common credential field names
+		for _, key := range []string{"api_key", "apiKey", "token", "accessToken", "access_token", "key", "claudeApiKey"} {
+			if val, ok := authData[key]; ok {
+				if s, ok := val.(string); ok && s != "" {
+					return s, nil
+				}
+			}
+		}
+
+		// For Claude, also check nested structures
+		if providerDir == "anthropic" {
+			// Check for oauthAccount.claudeApiKey pattern
+			if oauth, ok := authData["oauthAccount"].(map[string]interface{}); ok {
+				if apiKey, ok := oauth["claudeApiKey"].(string); ok && apiKey != "" {
+					return apiKey, nil
+				}
+			}
+		}
+	}
+
+	return "", errors.New("no API key found in vault profile auth files for: " + ref)
 }
 
 // resolveCaamCredential resolves a credential from a caam vault.

@@ -132,6 +132,8 @@ func shouldRunPreflight(cmd *cobra.Command) bool {
 		return false
 	case strings.HasPrefix(path, "swarm help"):
 		return false
+	case strings.HasPrefix(path, "swarm vault"):
+		return false
 	}
 
 	return true

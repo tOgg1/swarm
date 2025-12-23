@@ -172,9 +172,15 @@ var accountsAddCmd = &cobra.Command{
 }
 
 var accountsImportCaamCmd = &cobra.Command{
-	Use:   "import-caam",
-	Short: "Import accounts from caam vault",
-	Long: `Import accounts from a coding_agent_account_manager (caam) vault.
+	Use:        "import-caam",
+	Short:      "Import accounts from caam vault (DEPRECATED)",
+	Deprecated: "Use 'swarm vault' commands instead. The native vault provides better integration.",
+	Long: `DEPRECATED: Import accounts from a coding_agent_account_manager (caam) vault.
+
+This command is deprecated. Use the native Swarm vault instead:
+  swarm vault backup <adapter> <profile>  # Save current auth
+  swarm vault list                        # List saved profiles
+  swarm vault activate <adapter> <profile> # Switch profiles
 
 The caam vault stores account profiles for various AI coding assistants
 (Claude, Codex, Gemini) in a standard directory structure.

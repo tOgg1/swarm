@@ -1,4 +1,13 @@
 // Package caam provides parsing for coding_agent_account_manager configuration.
+//
+// Deprecated: Use the native vault package (internal/vault) instead.
+// The caam package is maintained for backwards compatibility with existing
+// caam: credential references. New integrations should use vault: references.
+//
+// Migration guide:
+//  1. Use 'swarm vault backup <adapter> <profile>' to save auth files
+//  2. Update credential references from 'caam:provider/email' to 'vault:adapter/profile'
+//  3. Use 'swarm vault activate <adapter> <profile>' to switch profiles
 package caam
 
 import (
