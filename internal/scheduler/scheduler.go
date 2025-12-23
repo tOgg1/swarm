@@ -13,6 +13,7 @@ import (
 
 	"github.com/opencode-ai/swarm/internal/account"
 	"github.com/opencode-ai/swarm/internal/agent"
+	"github.com/opencode-ai/swarm/internal/events"
 	"github.com/opencode-ai/swarm/internal/logging"
 	"github.com/opencode-ai/swarm/internal/models"
 	"github.com/opencode-ai/swarm/internal/queue"
@@ -139,6 +140,7 @@ type Scheduler struct {
 	queueService   queue.QueueService
 	stateEngine    *state.Engine
 	accountService *account.Service
+	publisher      events.Publisher
 	logger         zerolog.Logger
 
 	// Runtime state
@@ -159,8 +161,18 @@ type Scheduler struct {
 	dispatchCh chan DispatchEvent
 }
 
+// Option configures a Scheduler.
+type Option func(*Scheduler)
+
+// WithPublisher sets the event publisher for the scheduler.
+func WithPublisher(publisher events.Publisher) Option {
+	return func(s *Scheduler) {
+		s.publisher = publisher
+	}
+}
+
 // New creates a new Scheduler.
-func New(config Config, agentService *agent.Service, queueService queue.QueueService, stateEngine *state.Engine, accountService *account.Service) *Scheduler {
+func New(config Config, agentService *agent.Service, queueService queue.QueueService, stateEngine *state.Engine, accountService *account.Service, opts ...Option) *Scheduler {
 	if config.TickInterval <= 0 {
 		config.TickInterval = DefaultConfig().TickInterval
 	}
@@ -180,7 +192,7 @@ func New(config Config, agentService *agent.Service, queueService queue.QueueSer
 		config.DefaultCooldownDuration = DefaultConfig().DefaultCooldownDuration
 	}
 
-	return &Scheduler{
+	s := &Scheduler{
 		config:         config,
 		agentService:   agentService,
 		queueService:   queueService,
@@ -193,6 +205,12 @@ func New(config Config, agentService *agent.Service, queueService queue.QueueSer
 		retryAfter:     make(map[string]time.Time),
 		dispatchCh:     make(chan DispatchEvent, 100),
 	}
+
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	return s
 }
 
 // Start begins the scheduler's background processing loop.
@@ -666,6 +684,13 @@ func (s *Scheduler) dispatchToAgent(agentID string) {
 		ItemType:  item.Type,
 	}
 
+	// Publish message.dispatched event
+	s.publishEvent(ctx, models.EventTypeMessageDispatched, models.EntityTypeQueue, item.ID, models.MessageDispatchedPayload{
+		QueueItemID: item.ID,
+		ItemType:    item.Type,
+		AgentID:     agentID,
+	})
+
 	// Handle different item types
 	switch item.Type {
 	case models.QueueItemTypeMessage:
@@ -687,6 +712,16 @@ func (s *Scheduler) dispatchToAgent(agentID string) {
 			Str("item_id", item.ID).
 			Str("item_type", string(item.Type)).
 			Msg("dispatch failed")
+
+		// Publish message.failed event
+		s.publishEvent(ctx, models.EventTypeMessageFailed, models.EntityTypeQueue, item.ID, models.MessageFailedPayload{
+			QueueItemID: item.ID,
+			ItemType:    item.Type,
+			AgentID:     agentID,
+			Error:       err.Error(),
+			Attempts:    item.Attempts + 1,
+		})
+
 		if retryErr := s.handleDispatchFailure(context.Background(), agentID, item, err); retryErr != nil {
 			s.logger.Warn().
 				Err(retryErr).
@@ -702,6 +737,14 @@ func (s *Scheduler) dispatchToAgent(agentID string) {
 			Str("item_id", item.ID).
 			Str("item_type", string(item.Type)).
 			Msg("dispatch successful")
+
+		// Publish message.completed event
+		s.publishEvent(ctx, models.EventTypeMessageCompleted, models.EntityTypeQueue, item.ID, models.MessageCompletedPayload{
+			QueueItemID: item.ID,
+			ItemType:    item.Type,
+			AgentID:     agentID,
+			Duration:    time.Since(startTime).String(),
+		})
 	}
 }
 
@@ -921,6 +964,27 @@ func (s *Scheduler) recordDispatch(event DispatchEvent) {
 	default:
 		// Channel full, drop event
 	}
+}
+
+// publishEvent publishes an event if a publisher is configured.
+func (s *Scheduler) publishEvent(ctx context.Context, eventType models.EventType, entityType models.EntityType, entityID string, payload any) {
+	if s.publisher == nil {
+		return
+	}
+
+	event := &models.Event{
+		Type:       eventType,
+		EntityType: entityType,
+		EntityID:   entityID,
+	}
+
+	if payload != nil {
+		if data, err := json.Marshal(payload); err == nil {
+			event.Payload = data
+		}
+	}
+
+	s.publisher.Publish(ctx, event)
 }
 
 // onStateChange handles agent state change notifications.

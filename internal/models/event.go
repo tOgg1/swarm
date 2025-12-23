@@ -111,10 +111,36 @@ type StateChangedPayload struct {
 	Reason     string          `json:"reason"`
 }
 
+// MessageQueuedPayload is the payload for message.queued events.
+type MessageQueuedPayload struct {
+	QueueItemID string        `json:"queue_item_id"`
+	ItemType    QueueItemType `json:"item_type"`
+	AgentID     string        `json:"agent_id"`
+}
+
 // MessageDispatchedPayload is the payload for message.dispatched events.
 type MessageDispatchedPayload struct {
-	QueueItemID string `json:"queue_item_id"`
-	Message     string `json:"message"`
+	QueueItemID string        `json:"queue_item_id"`
+	ItemType    QueueItemType `json:"item_type"`
+	AgentID     string        `json:"agent_id"`
+	Message     string        `json:"message,omitempty"`
+}
+
+// MessageCompletedPayload is the payload for message.completed events.
+type MessageCompletedPayload struct {
+	QueueItemID string        `json:"queue_item_id"`
+	ItemType    QueueItemType `json:"item_type"`
+	AgentID     string        `json:"agent_id"`
+	Duration    string        `json:"duration"`
+}
+
+// MessageFailedPayload is the payload for message.failed events.
+type MessageFailedPayload struct {
+	QueueItemID string        `json:"queue_item_id"`
+	ItemType    QueueItemType `json:"item_type"`
+	AgentID     string        `json:"agent_id"`
+	Error       string        `json:"error"`
+	Attempts    int           `json:"attempts"`
 }
 
 // RateLimitPayload is the payload for rate_limit.detected events.
