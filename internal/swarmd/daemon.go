@@ -19,6 +19,15 @@ type Options struct {
 	Hostname string
 	Port     int
 	Version  string
+
+	// RateLimitEnabled enables rate limiting (default: true).
+	RateLimitEnabled *bool
+
+	// CustomRateLimits allows overriding default rate limits per method.
+	CustomRateLimits map[string]RateLimitConfig
+
+	// GlobalRateLimit sets an optional global rate limit across all methods.
+	GlobalRateLimit *RateLimitConfig
 }
 
 // Daemon is the long-running process responsible for node orchestration.
@@ -27,8 +36,9 @@ type Daemon struct {
 	logger zerolog.Logger
 	opts   Options
 
-	server     *Server
-	grpcServer *grpc.Server
+	server      *Server
+	grpcServer  *grpc.Server
+	rateLimiter *RateLimiter
 }
 
 // New constructs a daemon with the provided configuration.
@@ -46,16 +56,40 @@ func New(cfg *config.Config, logger zerolog.Logger, opts Options) (*Daemon, erro
 	// Create the gRPC service implementation
 	server := NewServer(logger, WithVersion(opts.Version))
 
-	// Create the gRPC server
-	grpcServer := grpc.NewServer()
+	// Create rate limiter with options
+	var rlOpts []RateLimiterOption
+	if opts.CustomRateLimits != nil {
+		rlOpts = append(rlOpts, WithMethodLimits(opts.CustomRateLimits))
+	}
+	if opts.GlobalRateLimit != nil {
+		rlOpts = append(rlOpts, WithGlobalLimit(*opts.GlobalRateLimit))
+	}
+	if opts.RateLimitEnabled != nil {
+		rlOpts = append(rlOpts, WithEnabled(*opts.RateLimitEnabled))
+	}
+	rateLimiter := NewRateLimiter(rlOpts...)
+
+	// Create the gRPC server with rate limiting interceptors
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(rateLimiter.UnaryServerInterceptor()),
+		grpc.ChainStreamInterceptor(rateLimiter.StreamServerInterceptor()),
+	)
 	swarmdv1.RegisterSwarmdServiceServer(grpcServer, server)
 
+	// Store rate limiter reference in server for status reporting
+	server.SetRateLimiter(rateLimiter)
+
+	logger.Info().
+		Bool("rate_limiting_enabled", rateLimiter.IsEnabled()).
+		Msg("rate limiter configured")
+
 	return &Daemon{
-		cfg:        cfg,
-		logger:     logger,
-		opts:       opts,
-		server:     server,
-		grpcServer: grpcServer,
+		cfg:         cfg,
+		logger:      logger,
+		opts:        opts,
+		server:      server,
+		grpcServer:  grpcServer,
+		rateLimiter: rateLimiter,
 	}, nil
 }
 
@@ -108,4 +142,10 @@ func (d *Daemon) bindAddr() string {
 // Useful for testing.
 func (d *Daemon) Server() *Server {
 	return d.server
+}
+
+// RateLimiter returns the rate limiter.
+// Useful for testing and runtime configuration.
+func (d *Daemon) RateLimiter() *RateLimiter {
+	return d.rateLimiter
 }

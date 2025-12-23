@@ -88,6 +88,9 @@ type Server struct {
 	nextEventID   int64                       // next event ID to assign
 	eventSubs     map[string]*eventSubscriber // active subscribers keyed by ID
 	eventSubIDSeq int64                       // subscriber ID sequence
+
+	// Rate limiter reference for status reporting
+	rateLimiter *RateLimiter
 }
 
 // ServerOption configures the Server.
@@ -120,6 +123,16 @@ func NewServer(logger zerolog.Logger, opts ...ServerOption) *Server {
 	}
 
 	return s
+}
+
+// SetRateLimiter sets the rate limiter reference for status reporting.
+func (s *Server) SetRateLimiter(rl *RateLimiter) {
+	s.rateLimiter = rl
+}
+
+// RateLimiter returns the rate limiter, if configured.
+func (s *Server) RateLimiter() *RateLimiter {
+	return s.rateLimiter
 }
 
 // =============================================================================
