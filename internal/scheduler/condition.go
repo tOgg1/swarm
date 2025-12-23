@@ -128,9 +128,11 @@ func (e *ConditionEvaluator) evaluateAfterPrevious(ctx ConditionContext) (Condit
 // evaluateCustomExpression evaluates a custom expression.
 // Supported expressions:
 //   - state == idle | working | paused | ...
-//   - state != <state>
+//   - agent_state != <state>
 //   - queue_length == 0 | > 0 | < 5 | >= 3 | <= 10
 //   - idle_for >= 30s | > 1m | < 5m
+//   - time_since_last >= 30s | < 5m
+//   - cooldown_remaining <= 30s | == 0s
 //   - time_of_day >= 09:00 | <= 17:00
 //   - true (always satisfied)
 //   - false (never satisfied)
@@ -159,12 +161,16 @@ func (e *ConditionEvaluator) evaluateCustomExpression(ctx ConditionContext, expr
 	value := strings.Join(parts[2:], " ")
 
 	switch field {
-	case "state":
+	case "state", "agent_state":
 		return e.evaluateStateExpr(ctx, operator, value)
 	case "queue_length", "queue":
 		return e.evaluateQueueLengthExpr(ctx, operator, value)
 	case "idle_for", "idle":
 		return e.evaluateIdleForExpr(ctx, operator, value)
+	case "time_since_last":
+		return e.evaluateTimeSinceLastExpr(ctx, operator, value)
+	case "cooldown_remaining":
+		return e.evaluateCooldownRemainingExpr(ctx, operator, value)
 	case "time_of_day", "time":
 		return e.evaluateTimeOfDayExpr(ctx, operator, value)
 	default:
@@ -299,6 +305,50 @@ func (e *ConditionEvaluator) evaluateIdleForExpr(ctx ConditionContext, operator,
 	return ConditionResult{Met: false, Reason: reason}, nil
 }
 
+// evaluateTimeSinceLastExpr evaluates time since last activity comparisons.
+func (e *ConditionEvaluator) evaluateTimeSinceLastExpr(ctx ConditionContext, operator, value string) (ConditionResult, error) {
+	if ctx.Agent == nil {
+		return ConditionResult{Met: false, Reason: "agent not available"}, nil
+	}
+
+	targetDuration, err := parseDuration(strings.TrimSpace(value))
+	if err != nil {
+		return ConditionResult{Met: false, Reason: "invalid duration"}, fmt.Errorf("invalid duration: %s", value)
+	}
+
+	now := ctx.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	var since time.Duration
+	if ctx.Agent.LastActivity != nil {
+		since = now.Sub(*ctx.Agent.LastActivity)
+	}
+
+	return evaluateDurationExpr("time_since_last", since, operator, targetDuration)
+}
+
+// evaluateCooldownRemainingExpr evaluates cooldown remaining comparisons.
+func (e *ConditionEvaluator) evaluateCooldownRemainingExpr(ctx ConditionContext, operator, value string) (ConditionResult, error) {
+	targetDuration, err := parseDuration(strings.TrimSpace(value))
+	if err != nil {
+		return ConditionResult{Met: false, Reason: "invalid duration"}, fmt.Errorf("invalid duration: %s", value)
+	}
+
+	now := ctx.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	var remaining time.Duration
+	if ctx.Agent != nil && ctx.Agent.PausedUntil != nil && now.Before(*ctx.Agent.PausedUntil) {
+		remaining = ctx.Agent.PausedUntil.Sub(now)
+	}
+
+	return evaluateDurationExpr("cooldown_remaining", remaining, operator, targetDuration)
+}
+
 // evaluateTimeOfDayExpr evaluates time-of-day comparisons.
 func (e *ConditionEvaluator) evaluateTimeOfDayExpr(ctx ConditionContext, operator, value string) (ConditionResult, error) {
 	targetTime, err := parseTimeOfDay(strings.TrimSpace(value))
@@ -385,6 +435,46 @@ func parseDuration(s string) (time.Duration, error) {
 	}
 
 	return time.ParseDuration(s)
+}
+
+func evaluateDurationExpr(label string, current time.Duration, operator string, target time.Duration) (ConditionResult, error) {
+	var met bool
+	switch operator {
+	case ">=":
+		met = current >= target
+	case ">":
+		met = current > target
+	case "<=":
+		met = current <= target
+	case "<":
+		met = current < target
+	case "==", "=":
+		diff := current - target
+		if diff < 0 {
+			diff = -diff
+		}
+		met = diff <= time.Second
+	default:
+		return ConditionResult{Met: false, Reason: fmt.Sprintf("invalid operator: %s", operator)}, fmt.Errorf("invalid operator: %s", operator)
+	}
+
+	reason := fmt.Sprintf("%s %s %s %s", label, current.Round(time.Second), operator, target)
+	if met {
+		return ConditionResult{Met: true, Reason: reason}, nil
+	}
+
+	result := ConditionResult{Met: false, Reason: reason}
+	switch operator {
+	case ">=", ">":
+		if remaining := target - current; remaining > 0 {
+			result.RetryAfter = &remaining
+		}
+	case "<=", "<":
+		if remaining := current - target; remaining > 0 {
+			result.RetryAfter = &remaining
+		}
+	}
+	return result, nil
 }
 
 // tokenizeExpression splits an expression into tokens.

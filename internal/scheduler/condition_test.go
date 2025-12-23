@@ -121,7 +121,9 @@ func TestConditionEvaluator_CustomExpression_StateComparison(t *testing.T) {
 		wantErr    bool
 	}{
 		{"state equals idle", "state == idle", models.AgentStateIdle, true, false},
+		{"agent_state equals idle", "agent_state == idle", models.AgentStateIdle, true, false},
 		{"state equals working", "state == working", models.AgentStateWorking, true, false},
+		{"agent_state not equals working", "agent_state != working", models.AgentStateIdle, true, false},
 		{"state not equals paused", "state != paused", models.AgentStateIdle, true, false},
 		{"state equals but different", "state == working", models.AgentStateIdle, false, false},
 		{"state not equals but same", "state != idle", models.AgentStateIdle, false, false},
@@ -218,6 +220,93 @@ func TestConditionEvaluator_CustomExpression_IdleFor(t *testing.T) {
 				Agent: &models.Agent{
 					State:        tt.state,
 					LastActivity: tt.lastActivity,
+				},
+				Now: now,
+			}
+			payload := models.ConditionalPayload{
+				ConditionType: models.ConditionTypeCustomExpression,
+				Expression:    tt.expression,
+				Message:       "test",
+			}
+
+			result, err := evaluator.Evaluate(ctx, condCtx, payload)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Met != tt.wantMet {
+				t.Errorf("got Met=%v, want %v (reason: %s)", result.Met, tt.wantMet, result.Reason)
+			}
+		})
+	}
+}
+
+func TestConditionEvaluator_CustomExpression_TimeSinceLast(t *testing.T) {
+	evaluator := NewConditionEvaluator()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	tests := []struct {
+		name         string
+		expression   string
+		lastActivity *time.Time
+		wantMet      bool
+	}{
+		{"since last meets", "time_since_last >= 1m", timePtr(now.Add(-2 * time.Minute)), true},
+		{"since last not met", "time_since_last < 30s", timePtr(now.Add(-2 * time.Minute)), false},
+		{"since last with no activity", "time_since_last == 0s", nil, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			condCtx := ConditionContext{
+				Agent: &models.Agent{
+					State:        models.AgentStateIdle,
+					LastActivity: tt.lastActivity,
+				},
+				Now: now,
+			}
+			payload := models.ConditionalPayload{
+				ConditionType: models.ConditionTypeCustomExpression,
+				Expression:    tt.expression,
+				Message:       "test",
+			}
+
+			result, err := evaluator.Evaluate(ctx, condCtx, payload)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Met != tt.wantMet {
+				t.Errorf("got Met=%v, want %v (reason: %s)", result.Met, tt.wantMet, result.Reason)
+			}
+		})
+	}
+}
+
+func TestConditionEvaluator_CustomExpression_CooldownRemaining(t *testing.T) {
+	evaluator := NewConditionEvaluator()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	activeCooldown := now.Add(2 * time.Minute)
+	expiredCooldown := now.Add(-2 * time.Minute)
+
+	tests := []struct {
+		name        string
+		expression  string
+		pausedUntil *time.Time
+		wantMet     bool
+	}{
+		{"cooldown remaining greater than", "cooldown_remaining > 1m", &activeCooldown, true},
+		{"cooldown remaining less or equal", "cooldown_remaining <= 1m", &activeCooldown, false},
+		{"cooldown expired", "cooldown_remaining == 0s", &expiredCooldown, true},
+		{"cooldown missing", "cooldown_remaining == 0s", nil, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			condCtx := ConditionContext{
+				Agent: &models.Agent{
+					State:       models.AgentStatePaused,
+					PausedUntil: tt.pausedUntil,
 				},
 				Now: now,
 			}
