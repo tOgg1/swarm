@@ -2,7 +2,7 @@ project_name: swarm
 
 release:
   github:
-    owner: opencode-ai
+    owner: tOgg1
     name: swarm
 
 builds:
