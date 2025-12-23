@@ -11,8 +11,23 @@ import (
 	"github.com/opencode-ai/swarm/internal/tui/styles"
 )
 
+// WorkspaceHeaderData contains data for the workspace header.
+type WorkspaceHeaderData struct {
+	Workspace *models.Workspace
+	// BeadsTasks is the number of open/in_progress beads tasks.
+	BeadsTasks int
+	// BeadsActive is the number of in_progress beads tasks.
+	BeadsActive int
+}
+
 // WorkspaceHeader renders the header for a workspace detail view.
 func WorkspaceHeader(styleSet styles.Styles, ws *models.Workspace, width int) string {
+	return WorkspaceHeaderWithBeads(styleSet, WorkspaceHeaderData{Workspace: ws}, width)
+}
+
+// WorkspaceHeaderWithBeads renders the header with optional beads task info.
+func WorkspaceHeaderWithBeads(styleSet styles.Styles, data WorkspaceHeaderData, width int) string {
+	ws := data.Workspace
 	if ws == nil {
 		return styleSet.Muted.Render("No workspace selected")
 	}
@@ -40,12 +55,25 @@ func WorkspaceHeader(styleSet styles.Styles, ws *models.Workspace, width int) st
 		alertLine = styleSet.Warning.Render(fmt.Sprintf("ALERTS:%d", len(ws.Alerts)))
 	}
 
+	// Beads tasks summary
+	tasksLine := ""
+	if data.BeadsTasks > 0 || data.BeadsActive > 0 {
+		if data.BeadsActive > 0 {
+			tasksLine = styleSet.Warning.Render(fmt.Sprintf("TASKS:%d(%d)", data.BeadsTasks, data.BeadsActive))
+		} else {
+			tasksLine = styleSet.Muted.Render(fmt.Sprintf("TASKS:%d", data.BeadsTasks))
+		}
+	}
+
 	// Build header
 	parts := []string{nameLine}
 	if branchLine != "" {
 		parts = append(parts, branchLine)
 	}
 	parts = append(parts, agentLine)
+	if tasksLine != "" {
+		parts = append(parts, tasksLine)
+	}
 	if alertLine != "" {
 		parts = append(parts, alertLine)
 	}

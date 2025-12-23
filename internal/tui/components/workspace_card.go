@@ -21,6 +21,11 @@ type WorkspaceCard struct {
 	AgentsBlocked int
 	AgentsError   int
 	Alerts        []string
+
+	// BeadsTasks is the number of open/in_progress beads tasks.
+	BeadsTasks int
+	// BeadsActive is the number of in_progress beads tasks.
+	BeadsActive int
 }
 
 // RenderWorkspaceCard renders a workspace card with basic metadata.
@@ -42,13 +47,28 @@ func RenderWorkspaceCard(styleSet styles.Styles, card WorkspaceCard) string {
 		alertLine = styleSet.Warning.Render(fmt.Sprintf("Alerts: %s", card.Alerts[0]))
 	}
 
-	content := strings.Join([]string{
+	// Beads task summary
+	tasksLine := ""
+	if card.BeadsTasks > 0 || card.BeadsActive > 0 {
+		if card.BeadsActive > 0 {
+			tasksLine = styleSet.Warning.Render(fmt.Sprintf("Tasks: %d open (%d active)", card.BeadsTasks, card.BeadsActive))
+		} else {
+			tasksLine = styleSet.Muted.Render(fmt.Sprintf("Tasks: %d open", card.BeadsTasks))
+		}
+	}
+
+	lines := []string{
 		header,
 		branch,
 		pulse,
 		agents,
 		alertLine,
-	}, "\n")
+	}
+	if tasksLine != "" {
+		lines = append(lines, tasksLine)
+	}
+
+	content := strings.Join(lines, "\n")
 
 	cardStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
