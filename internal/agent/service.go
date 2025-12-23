@@ -118,6 +118,9 @@ type SpawnOptions struct {
 	// InitialPrompt is an optional prompt to send after spawning.
 	InitialPrompt string
 
+	// ApprovalPolicy is the effective approval policy for this agent.
+	ApprovalPolicy string
+
 	// Environment contains optional environment variable overrides.
 	Environment map[string]string
 
@@ -203,7 +206,8 @@ func (s *Service) SpawnAgent(ctx context.Context, opts SpawnOptions) (*models.Ag
 			DetectedAt: time.Now().UTC(),
 		},
 		Metadata: models.AgentMetadata{
-			Environment: opts.Environment,
+			Environment:    opts.Environment,
+			ApprovalPolicy: opts.ApprovalPolicy,
 		},
 	}
 
@@ -668,10 +672,11 @@ func (s *Service) RestartAgent(ctx context.Context, id string) (*models.Agent, e
 
 	// Remember spawn options
 	opts := SpawnOptions{
-		WorkspaceID: agent.WorkspaceID,
-		Type:        agent.Type,
-		AccountID:   agent.AccountID,
-		Environment: agent.Metadata.Environment,
+		WorkspaceID:    agent.WorkspaceID,
+		Type:           agent.Type,
+		AccountID:      agent.AccountID,
+		Environment:    agent.Metadata.Environment,
+		ApprovalPolicy: agent.Metadata.ApprovalPolicy,
 	}
 
 	// Terminate the existing agent
@@ -785,11 +790,12 @@ func (s *Service) RestartAgentWithAccount(ctx context.Context, id, accountID str
 	}
 
 	opts := SpawnOptions{
-		WorkspaceID: agent.WorkspaceID,
-		Type:        agent.Type,
-		AccountID:   accountID,
-		Environment: env,
-		WorkingDir:  workDir,
+		WorkspaceID:    agent.WorkspaceID,
+		Type:           agent.Type,
+		AccountID:      accountID,
+		Environment:    env,
+		WorkingDir:     workDir,
+		ApprovalPolicy: agent.Metadata.ApprovalPolicy,
 	}
 
 	startCmd := s.buildStartCommand(opts)
@@ -982,10 +988,11 @@ func (s *Service) buildStartCommand(opts SpawnOptions) string {
 	}
 
 	cmd, args := adapter.SpawnCommand(adapters.SpawnOptions{
-		AgentType:     opts.Type,
-		AccountID:     opts.AccountID,
-		InitialPrompt: opts.InitialPrompt,
-		Environment:   opts.Environment,
+		AgentType:      opts.Type,
+		AccountID:      opts.AccountID,
+		InitialPrompt:  opts.InitialPrompt,
+		Environment:    opts.Environment,
+		ApprovalPolicy: opts.ApprovalPolicy,
 	})
 	if cmd == "" {
 		return ""

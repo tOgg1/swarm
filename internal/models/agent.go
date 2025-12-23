@@ -126,6 +126,9 @@ type AgentMetadata struct {
 	// Environment contains environment variable overrides.
 	Environment map[string]string `json:"environment,omitempty"`
 
+	// ApprovalPolicy captures the effective approval policy for the agent.
+	ApprovalPolicy string `json:"approval_policy,omitempty"`
+
 	// UsageMetrics captures best-effort usage data from adapters.
 	UsageMetrics *UsageMetrics `json:"usage_metrics,omitempty"`
 
