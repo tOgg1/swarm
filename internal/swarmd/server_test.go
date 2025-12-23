@@ -1,0 +1,132 @@
+package swarmd
+
+import (
+	"context"
+	"testing"
+
+	swarmdv1 "github.com/opencode-ai/swarm/gen/swarmd/v1"
+	"github.com/rs/zerolog"
+)
+
+func TestServerPing(t *testing.T) {
+	server := NewServer(zerolog.Nop(), WithVersion("test-version"))
+
+	resp, err := server.Ping(context.Background(), &swarmdv1.PingRequest{})
+	if err != nil {
+		t.Fatalf("Ping() error = %v", err)
+	}
+
+	if resp.Version != "test-version" {
+		t.Errorf("Version = %q, want %q", resp.Version, "test-version")
+	}
+	if resp.Timestamp == nil {
+		t.Error("Timestamp should not be nil")
+	}
+}
+
+func TestServerGetStatus(t *testing.T) {
+	server := NewServer(zerolog.Nop(), WithVersion("test-version"))
+
+	resp, err := server.GetStatus(context.Background(), &swarmdv1.GetStatusRequest{})
+	if err != nil {
+		t.Fatalf("GetStatus() error = %v", err)
+	}
+
+	if resp.Status == nil {
+		t.Fatal("Status should not be nil")
+	}
+	if resp.Status.Version != "test-version" {
+		t.Errorf("Version = %q, want %q", resp.Status.Version, "test-version")
+	}
+	if resp.Status.AgentCount != 0 {
+		t.Errorf("AgentCount = %d, want 0", resp.Status.AgentCount)
+	}
+}
+
+func TestServerListAgentsEmpty(t *testing.T) {
+	server := NewServer(zerolog.Nop())
+
+	resp, err := server.ListAgents(context.Background(), &swarmdv1.ListAgentsRequest{})
+	if err != nil {
+		t.Fatalf("ListAgents() error = %v", err)
+	}
+
+	if len(resp.Agents) != 0 {
+		t.Errorf("Agents count = %d, want 0", len(resp.Agents))
+	}
+}
+
+func TestServerGetAgentNotFound(t *testing.T) {
+	server := NewServer(zerolog.Nop())
+
+	_, err := server.GetAgent(context.Background(), &swarmdv1.GetAgentRequest{
+		AgentId: "nonexistent",
+	})
+	if err == nil {
+		t.Error("GetAgent() should return error for nonexistent agent")
+	}
+}
+
+func TestServerSpawnAgentValidation(t *testing.T) {
+	server := NewServer(zerolog.Nop())
+
+	tests := []struct {
+		name    string
+		req     *swarmdv1.SpawnAgentRequest
+		wantErr bool
+	}{
+		{
+			name:    "empty agent_id",
+			req:     &swarmdv1.SpawnAgentRequest{Command: "echo"},
+			wantErr: true,
+		},
+		{
+			name:    "empty command",
+			req:     &swarmdv1.SpawnAgentRequest{AgentId: "test-agent"},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := server.SpawnAgent(context.Background(), tt.req)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("SpawnAgent() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestServerKillAgentNotFound(t *testing.T) {
+	server := NewServer(zerolog.Nop())
+
+	_, err := server.KillAgent(context.Background(), &swarmdv1.KillAgentRequest{
+		AgentId: "nonexistent",
+	})
+	if err == nil {
+		t.Error("KillAgent() should return error for nonexistent agent")
+	}
+}
+
+func TestServerSendInputNotFound(t *testing.T) {
+	server := NewServer(zerolog.Nop())
+
+	_, err := server.SendInput(context.Background(), &swarmdv1.SendInputRequest{
+		AgentId: "nonexistent",
+		Text:    "hello",
+	})
+	if err == nil {
+		t.Error("SendInput() should return error for nonexistent agent")
+	}
+}
+
+func TestServerCapturePaneNotFound(t *testing.T) {
+	server := NewServer(zerolog.Nop())
+
+	_, err := server.CapturePane(context.Background(), &swarmdv1.CapturePaneRequest{
+		AgentId: "nonexistent",
+	})
+	if err == nil {
+		t.Error("CapturePane() should return error for nonexistent agent")
+	}
+}
