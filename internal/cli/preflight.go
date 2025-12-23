@@ -124,6 +124,8 @@ func shouldRunPreflight(cmd *cobra.Command) bool {
 
 	path := cmd.CommandPath()
 	switch {
+	case strings.HasPrefix(path, "swarm init"):
+		return false
 	case strings.HasPrefix(path, "swarm migrate"):
 		return false
 	case strings.HasPrefix(path, "swarm completion"):
