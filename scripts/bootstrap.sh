@@ -409,7 +409,7 @@ resolve_swarm_tag() {
       fail "curl is required to resolve latest swarmd version"
     fi
     local tag
-    tag="$(curl -fsSL https://api.github.com/repos/opencode-ai/swarm/releases/latest | tr -d '\r' | awk -F\" '/tag_name/{print $4; exit}')"
+    tag="$(curl -fsSL https://api.github.com/repos/tOgg1/swarm/releases/latest | tr -d '\r' | awk -F\" '/tag_name/{print $4; exit}')"
     if [ -z "$tag" ]; then
       fail "failed to resolve latest swarmd version"
     fi
@@ -459,7 +459,7 @@ install_swarmd() {
   tag="$(resolve_swarm_tag "$SWARM_SWARMD_VERSION")"
   version="$(swarm_archive_version "$tag")"
   asset="swarm_${version}_${os}_${arch}.tar.gz"
-  url="https://github.com/opencode-ai/swarm/releases/download/${tag}/${asset}"
+  url="https://github.com/tOgg1/swarm/releases/download/${tag}/${asset}"
 
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' RETURN

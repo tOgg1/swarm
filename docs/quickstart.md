@@ -17,11 +17,11 @@ Use the bootstrap script to install dependencies on a fresh node.
 
 ```bash
 # One-liner (downloads + verifies bootstrap.sh before running)
-curl -fsSL https://raw.githubusercontent.com/opencode-ai/swarm/main/scripts/install.sh | bash -s -- --install-extras --install-claude
+curl -fsSL https://raw.githubusercontent.com/tOgg1/swarm/main/scripts/install.sh | bash -s -- --install-extras --install-claude
 
 # Manual download + verify
-curl -fsSL https://raw.githubusercontent.com/opencode-ai/swarm/main/scripts/bootstrap.sh -o bootstrap.sh
-curl -fsSL https://raw.githubusercontent.com/opencode-ai/swarm/main/scripts/bootstrap.sh.sha256 -o bootstrap.sh.sha256
+curl -fsSL https://raw.githubusercontent.com/tOgg1/swarm/main/scripts/bootstrap.sh -o bootstrap.sh
+curl -fsSL https://raw.githubusercontent.com/tOgg1/swarm/main/scripts/bootstrap.sh.sha256 -o bootstrap.sh.sha256
 sha256sum -c bootstrap.sh.sha256
 sudo bash bootstrap.sh --install-extras --install-claude
 ```

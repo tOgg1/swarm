@@ -3,7 +3,7 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-SWARM_BOOTSTRAP_BASE_URL="${SWARM_BOOTSTRAP_BASE_URL:-https://raw.githubusercontent.com/opencode-ai/swarm/main/scripts}"
+SWARM_BOOTSTRAP_BASE_URL="${SWARM_BOOTSTRAP_BASE_URL:-https://raw.githubusercontent.com/tOgg1/swarm/main/scripts}"
 SWARM_BOOTSTRAP_URL="${SWARM_BOOTSTRAP_URL:-${SWARM_BOOTSTRAP_BASE_URL}/bootstrap.sh}"
 SWARM_BOOTSTRAP_SHA_URL="${SWARM_BOOTSTRAP_SHA_URL:-${SWARM_BOOTSTRAP_BASE_URL}/bootstrap.sh.sha256}"
 
