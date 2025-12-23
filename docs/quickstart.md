@@ -11,6 +11,21 @@ are not implemented yet are marked as planned.
 - tmux (required for workspace/agent orchestration)
 - ssh (for remote nodes)
 
+## Bootstrap a node (optional)
+
+Use the bootstrap script to install dependencies on a fresh node.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/opencode-ai/swarm/main/scripts/bootstrap.sh -o swarm-bootstrap.sh
+curl -fsSL https://raw.githubusercontent.com/opencode-ai/swarm/main/scripts/bootstrap.sh.sha256 -o swarm-bootstrap.sh.sha256
+sha256sum -c swarm-bootstrap.sh.sha256
+sudo bash swarm-bootstrap.sh --install-extras --install-claude
+```
+
+Notes:
+- `--install-claude` is opt-in; omit it if you do not want Claude Code installed.
+- The checksum file in `scripts/bootstrap.sh.sha256` must be kept in sync with the script.
+
 ## Build
 
 ```bash

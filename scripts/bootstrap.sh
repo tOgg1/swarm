@@ -10,6 +10,9 @@
 #   SWARM_INSTALL_EXTRAS      Install optional extras (default: 0)
 #   SWARM_INSTALL_OPENCODE    Install OpenCode CLI (default: 1)
 #   SWARM_OPENCODE_VERSION    OpenCode release version (default: latest)
+#   SWARM_INSTALL_CLAUDE      Install Claude Code CLI (default: 0)
+#   SWARM_CLAUDE_VERSION      Claude Code npm version (default: latest)
+#   SWARM_CLAUDE_NPM_PACKAGE  Claude Code npm package (default: @anthropic-ai/claude-code)
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -21,6 +24,60 @@ SWARM_INHERIT_ROOT_KEYS="${SWARM_INHERIT_ROOT_KEYS:-1}"
 SWARM_INSTALL_EXTRAS="${SWARM_INSTALL_EXTRAS:-0}"
 SWARM_INSTALL_OPENCODE="${SWARM_INSTALL_OPENCODE:-1}"
 SWARM_OPENCODE_VERSION="${SWARM_OPENCODE_VERSION:-latest}"
+SWARM_INSTALL_CLAUDE="${SWARM_INSTALL_CLAUDE:-0}"
+SWARM_CLAUDE_VERSION="${SWARM_CLAUDE_VERSION:-latest}"
+SWARM_CLAUDE_NPM_PACKAGE="${SWARM_CLAUDE_NPM_PACKAGE:-@anthropic-ai/claude-code}"
+
+usage() {
+  cat <<'EOF'
+Usage: bootstrap.sh [options]
+
+Options:
+  --install-extras       Install optional packages (jq, ripgrep, rsync).
+  --no-install-extras    Skip optional packages (default).
+  --install-claude       Install Claude Code CLI via npm.
+  --no-install-claude    Skip Claude Code install (default).
+  --claude-version <v>   Pin Claude Code npm version (default: latest).
+  -h, --help             Show this help text.
+EOF
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --install-extras)
+        SWARM_INSTALL_EXTRAS="1"
+        ;;
+      --no-install-extras)
+        SWARM_INSTALL_EXTRAS="0"
+        ;;
+      --install-claude)
+        SWARM_INSTALL_CLAUDE="1"
+        ;;
+      --no-install-claude)
+        SWARM_INSTALL_CLAUDE="0"
+        ;;
+      --claude-version)
+        shift
+        if [ "$#" -eq 0 ]; then
+          fail "--claude-version requires a value"
+        fi
+        SWARM_CLAUDE_VERSION="$1"
+        ;;
+      --claude-version=*)
+        SWARM_CLAUDE_VERSION="${1#*=}"
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        warn "unknown argument: $1"
+        ;;
+    esac
+    shift
+  done
+}
 
 log() {
   printf '%s\n' "[swarm-bootstrap] $*"
@@ -187,6 +244,39 @@ install_opencode() {
     fail "opencode install failed"
   fi
   log "opencode installed"
+}
+
+install_claude() {
+  if [ "$SWARM_INSTALL_CLAUDE" != "1" ]; then
+    log "skipping Claude Code install (SWARM_INSTALL_CLAUDE=$SWARM_INSTALL_CLAUDE)"
+    return
+  fi
+
+  if command_exists claude; then
+    log "claude already installed"
+    return
+  fi
+
+  if ! command_exists npm; then
+    warn "npm not available; cannot install Claude Code CLI"
+    return
+  fi
+
+  local pkg="$SWARM_CLAUDE_NPM_PACKAGE"
+  if [ "$SWARM_CLAUDE_VERSION" != "latest" ] && [ -n "$SWARM_CLAUDE_VERSION" ]; then
+    pkg="${pkg}@${SWARM_CLAUDE_VERSION}"
+  fi
+
+  log "installing Claude Code CLI via npm ($pkg)"
+  if npm install -g "$pkg"; then
+    log "claude installed"
+  else
+    warn "Claude Code CLI install failed; try manual install steps"
+  fi
+
+  if ! command_exists claude; then
+    warn "claude not found after install"
+  fi
 }
 
 verify_runtime() {
@@ -390,6 +480,7 @@ ensure_services() {
 
 main() {
   require_root
+  parse_args "$@"
 
   local manager
   manager="$(detect_pkg_manager)"
@@ -397,6 +488,7 @@ main() {
 
   install_dependencies "$manager"
   install_opencode "$manager"
+  install_claude
   ensure_user
   ensure_ssh_keys
   configure_shell_defaults
