@@ -157,6 +157,7 @@ type model struct {
 	nodesPreview           bool
 	workspacesPreview      bool
 	workspaceGrid          *components.WorkspaceGrid
+	beadsCache             map[string]beadsSnapshot
 	selectedWsID           string // Selected workspace ID for drill-down
 	pulseFrame             int
 	transcriptViewer       *components.TranscriptViewer
@@ -257,6 +258,7 @@ func initialModel() model {
 	approvals := sampleApprovals()
 	auditItems := sampleAuditItems()
 	mailThreads := sampleMailboxThreads()
+	beadsCache := sampleBeadsSnapshots()
 	return model{
 		styles:                styles.DefaultStyles(),
 		view:                  viewDashboard,
@@ -276,6 +278,7 @@ func initialModel() model {
 		nodesPreview:          true,
 		workspaceGrid:         grid,
 		workspacesPreview:     true,
+		beadsCache:            beadsCache,
 		queueEditors:          queueEditors,
 		approvalsByWorkspace:  approvals,
 		approvalsMarked:       make(map[string]map[string]bool),
@@ -597,6 +600,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastUpdated = time.Now()
 			m.stale = false
 			m.refreshingUntil = time.Now().Add(refreshPulseDuration)
+			m.refreshBeadsCache()
 			cmds := []tea.Cmd{staleCheckCmd(m.lastUpdated)}
 			if m.mailClient != nil {
 				cmds = append(cmds, m.mailboxRefreshCmd())
@@ -1050,6 +1054,9 @@ func (m model) workspaceInspectorLines() []string {
 	} else {
 		lines = append(lines, m.styles.Muted.Render("  Not a git repository"))
 	}
+
+	lines = append(lines, "")
+	lines = append(lines, m.beadsPanelLines(ws)...)
 
 	if len(ws.Alerts) > 0 {
 		lines = append(lines, m.styles.Warning.Render(fmt.Sprintf("Alerts: %d", len(ws.Alerts))))
@@ -3280,6 +3287,7 @@ func (m *model) applyPaletteAction(action paletteAction) tea.Cmd {
 		m.lastUpdated = time.Now()
 		m.stale = false
 		m.refreshingUntil = time.Now().Add(refreshPulseDuration)
+		m.refreshBeadsCache()
 		cmds := []tea.Cmd{staleCheckCmd(m.lastUpdated)}
 		if m.mailClient != nil {
 			cmds = append(cmds, m.mailboxRefreshCmd())
