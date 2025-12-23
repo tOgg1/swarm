@@ -24,8 +24,8 @@ var (
 )
 
 func main() {
-	hostname := flag.String("hostname", "127.0.0.1", "hostname to listen on")
-	port := flag.Int("port", 0, "port to listen on")
+	hostname := flag.String("hostname", swarmd.DefaultHost, "hostname to listen on")
+	port := flag.Int("port", swarmd.DefaultPort, "port to listen on")
 	configFile := flag.String("config", "", "config file (default is $HOME/.config/swarm/config.yaml)")
 	logLevel := flag.String("log-level", "", "override logging level (debug, info, warn, error)")
 	logFormat := flag.String("log-format", "", "override logging format (json, console)")
