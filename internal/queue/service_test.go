@@ -186,3 +186,114 @@ func TestService_InsertReorderClearRemove(t *testing.T) {
 		t.Fatalf("expected ErrQueueItemNotFound, got %v", err)
 	}
 }
+
+func TestService_UpdateStatus(t *testing.T) {
+	service, testDB, cleanup := setupTestService(t)
+	defer cleanup()
+
+	ws := createTestWorkspace(t, testDB)
+	agent := createTestAgent(t, testDB, ws)
+	ctx := context.Background()
+
+	item := newMessageItem(t, "status test")
+	if err := service.Enqueue(ctx, agent.ID, item); err != nil {
+		t.Fatalf("Enqueue failed: %v", err)
+	}
+
+	// Update status to failed with error message
+	if err := service.UpdateStatus(ctx, item.ID, models.QueueItemStatusFailed, "dispatch error"); err != nil {
+		t.Fatalf("UpdateStatus failed: %v", err)
+	}
+
+	// Verify status was updated
+	items, err := service.List(ctx, agent.ID)
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].Status != models.QueueItemStatusFailed {
+		t.Errorf("expected status=failed, got %s", items[0].Status)
+	}
+	if items[0].Error != "dispatch error" {
+		t.Errorf("expected error='dispatch error', got %s", items[0].Error)
+	}
+}
+
+func TestService_UpdateStatus_NotFound(t *testing.T) {
+	service, _, cleanup := setupTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	err := service.UpdateStatus(ctx, "nonexistent-id", models.QueueItemStatusFailed, "error")
+	if err == nil {
+		t.Fatal("expected error for nonexistent item")
+	}
+	if !errors.Is(err, ErrQueueItemNotFound) {
+		t.Errorf("expected ErrQueueItemNotFound, got %v", err)
+	}
+}
+
+func TestService_UpdateAttempts(t *testing.T) {
+	service, testDB, cleanup := setupTestService(t)
+	defer cleanup()
+
+	ws := createTestWorkspace(t, testDB)
+	agent := createTestAgent(t, testDB, ws)
+	ctx := context.Background()
+
+	item := newMessageItem(t, "attempts test")
+	if err := service.Enqueue(ctx, agent.ID, item); err != nil {
+		t.Fatalf("Enqueue failed: %v", err)
+	}
+
+	// Update attempts
+	if err := service.UpdateAttempts(ctx, item.ID, 3); err != nil {
+		t.Fatalf("UpdateAttempts failed: %v", err)
+	}
+
+	// Verify attempts was updated
+	items, err := service.List(ctx, agent.ID)
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].Attempts != 3 {
+		t.Errorf("expected attempts=3, got %d", items[0].Attempts)
+	}
+}
+
+func TestService_UpdateAttempts_NotFound(t *testing.T) {
+	service, _, cleanup := setupTestService(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	err := service.UpdateAttempts(ctx, "nonexistent-id", 5)
+	if err == nil {
+		t.Fatal("expected error for nonexistent item")
+	}
+	if !errors.Is(err, ErrQueueItemNotFound) {
+		t.Errorf("expected ErrQueueItemNotFound, got %v", err)
+	}
+}
+
+func TestService_Dequeue_Empty(t *testing.T) {
+	service, testDB, cleanup := setupTestService(t)
+	defer cleanup()
+
+	ws := createTestWorkspace(t, testDB)
+	agent := createTestAgent(t, testDB, ws)
+	ctx := context.Background()
+
+	// Dequeue from empty queue
+	_, err := service.Dequeue(ctx, agent.ID)
+	if err == nil {
+		t.Fatal("expected error for empty queue")
+	}
+	if !errors.Is(err, ErrQueueEmpty) {
+		t.Errorf("expected ErrQueueEmpty, got %v", err)
+	}
+}
