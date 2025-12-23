@@ -16,14 +16,19 @@ are not implemented yet are marked as planned.
 Use the bootstrap script to install dependencies on a fresh node.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/opencode-ai/swarm/main/scripts/bootstrap.sh -o swarm-bootstrap.sh
-curl -fsSL https://raw.githubusercontent.com/opencode-ai/swarm/main/scripts/bootstrap.sh.sha256 -o swarm-bootstrap.sh.sha256
-sha256sum -c swarm-bootstrap.sh.sha256
-sudo bash swarm-bootstrap.sh --install-extras --install-claude
+# One-liner (downloads + verifies bootstrap.sh before running)
+curl -fsSL https://raw.githubusercontent.com/opencode-ai/swarm/main/scripts/install.sh | bash -s -- --install-extras --install-claude
+
+# Manual download + verify
+curl -fsSL https://raw.githubusercontent.com/opencode-ai/swarm/main/scripts/bootstrap.sh -o bootstrap.sh
+curl -fsSL https://raw.githubusercontent.com/opencode-ai/swarm/main/scripts/bootstrap.sh.sha256 -o bootstrap.sh.sha256
+sha256sum -c bootstrap.sh.sha256
+sudo bash bootstrap.sh --install-extras --install-claude
 ```
 
 Notes:
 - `--install-claude` is opt-in; omit it if you do not want Claude Code installed.
+- `scripts/install.sh` verifies `bootstrap.sh` against `bootstrap.sh.sha256`.
 - The checksum file in `scripts/bootstrap.sh.sha256` must be kept in sync with the script.
 
 ## Build
