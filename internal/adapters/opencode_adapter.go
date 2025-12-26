@@ -15,11 +15,14 @@ func NewOpenCodeAdapter() *openCodeAdapter {
 			"opencode>",
 			"waiting for input",
 			"❯",
+			"⊙",               // idle indicator in status bar
+			"ctrl+p commands", // bottom bar when idle
 		),
 		WithBusyIndicators(
 			"thinking",
 			"generating",
-			"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
+			"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", // spinner
+			"▣", // working indicator in status bar
 		),
 	)
 
