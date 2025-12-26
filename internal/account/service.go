@@ -17,6 +17,7 @@ import (
 	"github.com/opencode-ai/swarm/internal/events"
 	"github.com/opencode-ai/swarm/internal/logging"
 	"github.com/opencode-ai/swarm/internal/models"
+	"github.com/opencode-ai/swarm/internal/vault"
 	"github.com/rs/zerolog"
 )
 
@@ -36,6 +37,7 @@ type Service struct {
 	repo            *db.AccountRepository
 	publisher       events.Publisher
 	logger          zerolog.Logger
+	vaultPath       string // Path to the native credential vault
 }
 
 // ServiceOption configures an account Service.
@@ -55,12 +57,21 @@ func WithPublisher(publisher events.Publisher) ServiceOption {
 	}
 }
 
+// WithVaultPath configures the path to the native credential vault.
+// If not set, the default vault path (~/.config/swarm/vault) is used.
+func WithVaultPath(path string) ServiceOption {
+	return func(s *Service) {
+		s.vaultPath = path
+	}
+}
+
 // NewService creates a new account service from config.
 func NewService(cfg *config.Config, opts ...ServiceOption) *Service {
 	s := &Service{
 		accounts:        make(map[string]*models.Account),
 		defaultCooldown: cfg.Scheduler.DefaultCooldownDuration,
 		logger:          logging.Component("account"),
+		vaultPath:       vault.DefaultVaultPath(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -916,4 +927,147 @@ func lastUsedTime(account *models.Account) time.Time {
 		return time.Time{}
 	}
 	return account.UsageStats.LastUsed.UTC()
+}
+
+// VaultPath returns the configured vault path.
+func (s *Service) VaultPath() string {
+	return s.vaultPath
+}
+
+// SyncFromVault imports vault profiles as accounts.
+// This creates account entries for each vault profile with credential references
+// in the format "vault:adapter/profile".
+// Returns the number of accounts synced and any error encountered.
+func (s *Service) SyncFromVault(ctx context.Context) (int, error) {
+	profiles, err := vault.List(s.vaultPath, "")
+	if err != nil {
+		return 0, err
+	}
+
+	var synced int
+	for _, profile := range profiles {
+		provider := adapterToProvider(profile.Adapter)
+		if provider == "" {
+			s.logger.Warn().
+				Str("adapter", string(profile.Adapter)).
+				Str("profile", profile.Name).
+				Msg("unknown adapter, skipping vault profile")
+			continue
+		}
+
+		// Generate account ID: provider/profile
+		accountID := string(profile.Adapter) + "/" + profile.Name
+		credentialRef := "vault:" + string(profile.Adapter) + "/" + profile.Name
+
+		s.mu.Lock()
+		if existing, exists := s.accounts[accountID]; exists {
+			// Update existing account
+			existing.CredentialRef = credentialRef
+			existing.UpdatedAt = time.Now().UTC()
+			s.mu.Unlock()
+			continue
+		}
+
+		// Create new account
+		account := &models.Account{
+			ID:            accountID,
+			Provider:      provider,
+			ProfileName:   profile.Name,
+			CredentialRef: credentialRef,
+			IsActive:      true,
+			CreatedAt:     profile.CreatedAt,
+			UpdatedAt:     time.Now().UTC(),
+		}
+		s.accounts[accountID] = account
+		s.mu.Unlock()
+		synced++
+
+		s.logger.Info().
+			Str("account_id", accountID).
+			Str("provider", string(provider)).
+			Str("profile", profile.Name).
+			Msg("synced vault profile as account")
+	}
+
+	return synced, nil
+}
+
+// ActivateVaultProfile activates a vault profile for an adapter.
+// This is typically called before spawning an agent to ensure the correct
+// credentials are in place.
+func (s *Service) ActivateVaultProfile(ctx context.Context, adapter vault.Adapter, profileName string) error {
+	if err := vault.Activate(s.vaultPath, adapter, profileName); err != nil {
+		return err
+	}
+
+	s.logger.Debug().
+		Str("adapter", string(adapter)).
+		Str("profile", profileName).
+		Msg("activated vault profile")
+
+	return nil
+}
+
+// ActivateForAgent activates the vault profile for an account and returns
+// the credential environment variables needed for the agent.
+// If the account uses a vault: credential reference, the profile is activated first.
+func (s *Service) ActivateForAgent(ctx context.Context, accountID, agentID string) (map[string]string, error) {
+	s.mu.RLock()
+	account, exists := s.accounts[accountID]
+	if !exists {
+		s.mu.RUnlock()
+		return nil, ErrAccountNotFound
+	}
+	credRef := account.CredentialRef
+	s.mu.RUnlock()
+
+	// Check if this is a vault credential reference
+	if strings.HasPrefix(credRef, "vault:") {
+		ref := strings.TrimPrefix(credRef, "vault:")
+		parts := strings.SplitN(ref, "/", 2)
+		if len(parts) == 2 {
+			adapter := vault.ParseAdapter(parts[0])
+			profileName := parts[1]
+			if adapter != "" {
+				if err := s.ActivateVaultProfile(ctx, adapter, profileName); err != nil {
+					return nil, err
+				}
+				s.logger.Info().
+					Str("account_id", accountID).
+					Str("agent_id", agentID).
+					Str("adapter", string(adapter)).
+					Str("profile", profileName).
+					Msg("activated vault profile for agent")
+			}
+		}
+	}
+
+	// Get credential environment
+	return s.GetCredentialEnv(ctx, accountID)
+}
+
+// GetActiveVaultProfile returns the currently active vault profile for an adapter.
+func (s *Service) GetActiveVaultProfile(ctx context.Context, adapter vault.Adapter) (*vault.Profile, error) {
+	return vault.GetActive(s.vaultPath, adapter)
+}
+
+// ListVaultProfiles returns all vault profiles, optionally filtered by adapter.
+func (s *Service) ListVaultProfiles(ctx context.Context, adapter vault.Adapter) ([]*vault.Profile, error) {
+	return vault.List(s.vaultPath, adapter)
+}
+
+// adapterToProvider maps vault adapters to account providers.
+func adapterToProvider(adapter vault.Adapter) models.Provider {
+	switch adapter {
+	case vault.AdapterClaude:
+		return models.ProviderAnthropic
+	case vault.AdapterCodex:
+		return models.ProviderOpenAI
+	case vault.AdapterGemini:
+		return models.ProviderGoogle
+	case vault.AdapterOpenCode:
+		return models.ProviderCustom
+	default:
+		return ""
+	}
 }

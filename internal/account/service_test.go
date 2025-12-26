@@ -13,6 +13,7 @@ import (
 	"github.com/opencode-ai/swarm/internal/db"
 	"github.com/opencode-ai/swarm/internal/events"
 	"github.com/opencode-ai/swarm/internal/models"
+	"github.com/opencode-ai/swarm/internal/vault"
 )
 
 func TestResolveCredential_EnvPrefix(t *testing.T) {
@@ -553,5 +554,211 @@ func TestService_RotateAccount_NoEventWithoutPublisher(t *testing.T) {
 	_, err := service.RotateAccount(ctx, current.ID)
 	if err != nil {
 		t.Fatalf("RotateAccount failed: %v", err)
+	}
+}
+
+func TestService_WithVaultPath(t *testing.T) {
+	cfg := config.DefaultConfig()
+	customPath := "/custom/vault/path"
+
+	service := NewService(cfg, WithVaultPath(customPath))
+
+	if service.VaultPath() != customPath {
+		t.Errorf("expected vault path %q, got %q", customPath, service.VaultPath())
+	}
+}
+
+func TestService_SyncFromVault(t *testing.T) {
+	// Create temp vault directory
+	vaultPath := t.TempDir()
+	profilesPath := filepath.Join(vaultPath, "profiles")
+
+	// Create a mock profile for anthropic/testprofile
+	profilePath := filepath.Join(profilesPath, "anthropic", "testprofile")
+	if err := os.MkdirAll(profilePath, 0700); err != nil {
+		t.Fatalf("failed to create profile dir: %v", err)
+	}
+
+	// Write auth file
+	authData := `{"api_key": "sk-ant-test123"}`
+	if err := os.WriteFile(filepath.Join(profilePath, ".claude.json"), []byte(authData), 0600); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	// Write metadata
+	meta := map[string]interface{}{
+		"adapter":      "claude",
+		"name":         "testprofile",
+		"created_at":   time.Now().UTC().Format(time.RFC3339),
+		"updated_at":   time.Now().UTC().Format(time.RFC3339),
+		"auth_files":   []string{".claude.json"},
+		"content_hash": "abc123",
+	}
+	metaJSON, _ := json.Marshal(meta)
+	if err := os.WriteFile(filepath.Join(profilePath, "meta.json"), metaJSON, 0600); err != nil {
+		t.Fatalf("failed to write meta file: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	ctx := context.Background()
+
+	service := NewService(cfg, WithVaultPath(vaultPath))
+
+	synced, err := service.SyncFromVault(ctx)
+	if err != nil {
+		t.Fatalf("SyncFromVault failed: %v", err)
+	}
+
+	if synced != 1 {
+		t.Errorf("expected 1 account synced, got %d", synced)
+	}
+
+	// Verify account was created
+	accounts := service.List(ctx)
+	if len(accounts) != 1 {
+		t.Fatalf("expected 1 account, got %d", len(accounts))
+	}
+
+	acct := accounts[0]
+	if acct.Provider != models.ProviderAnthropic {
+		t.Errorf("expected provider anthropic, got %s", acct.Provider)
+	}
+	if acct.ProfileName != "testprofile" {
+		t.Errorf("expected profile name testprofile, got %s", acct.ProfileName)
+	}
+	if acct.CredentialRef != "vault:claude/testprofile" {
+		t.Errorf("expected credential ref vault:claude/testprofile, got %s", acct.CredentialRef)
+	}
+	if !acct.IsActive {
+		t.Error("expected account to be active")
+	}
+}
+
+func TestService_SyncFromVault_UpdatesExisting(t *testing.T) {
+	vaultPath := t.TempDir()
+	profilesPath := filepath.Join(vaultPath, "profiles")
+
+	// Create a mock profile
+	profilePath := filepath.Join(profilesPath, "anthropic", "existing")
+	if err := os.MkdirAll(profilePath, 0700); err != nil {
+		t.Fatalf("failed to create profile dir: %v", err)
+	}
+
+	authData := `{"api_key": "sk-ant-test123"}`
+	if err := os.WriteFile(filepath.Join(profilePath, ".claude.json"), []byte(authData), 0600); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	meta := map[string]interface{}{
+		"adapter":      "claude",
+		"name":         "existing",
+		"created_at":   time.Now().UTC().Format(time.RFC3339),
+		"updated_at":   time.Now().UTC().Format(time.RFC3339),
+		"auth_files":   []string{".claude.json"},
+		"content_hash": "abc123",
+	}
+	metaJSON, _ := json.Marshal(meta)
+	if err := os.WriteFile(filepath.Join(profilePath, "meta.json"), metaJSON, 0600); err != nil {
+		t.Fatalf("failed to write meta file: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	ctx := context.Background()
+
+	service := NewService(cfg, WithVaultPath(vaultPath))
+
+	// Add existing account with old credential ref
+	existing := &models.Account{
+		ID:            "claude/existing",
+		Provider:      models.ProviderAnthropic,
+		ProfileName:   "existing",
+		CredentialRef: "old-ref",
+		IsActive:      true,
+	}
+	if err := service.AddAccount(ctx, existing); err != nil {
+		t.Fatalf("AddAccount failed: %v", err)
+	}
+
+	// Sync should update the existing account
+	synced, err := service.SyncFromVault(ctx)
+	if err != nil {
+		t.Fatalf("SyncFromVault failed: %v", err)
+	}
+
+	// Should be 0 new accounts (just updated existing)
+	if synced != 0 {
+		t.Errorf("expected 0 new accounts synced, got %d", synced)
+	}
+
+	// Verify credential ref was updated
+	acct, err := service.Get(ctx, "claude/existing")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if acct.CredentialRef != "vault:claude/existing" {
+		t.Errorf("expected credential ref vault:claude/existing, got %s", acct.CredentialRef)
+	}
+}
+
+func TestService_ActivateForAgent_NonVaultCredential(t *testing.T) {
+	cfg := config.DefaultConfig()
+	ctx := context.Background()
+
+	t.Setenv("TEST_API_KEY", "test-key-123")
+
+	service := NewService(cfg)
+
+	account := &models.Account{
+		ID:            "test-account",
+		Provider:      models.ProviderOpenAI,
+		ProfileName:   "test",
+		CredentialRef: "env:TEST_API_KEY",
+		IsActive:      true,
+	}
+	if err := service.AddAccount(ctx, account); err != nil {
+		t.Fatalf("AddAccount failed: %v", err)
+	}
+
+	env, err := service.ActivateForAgent(ctx, account.ID, "agent-1")
+	if err != nil {
+		t.Fatalf("ActivateForAgent failed: %v", err)
+	}
+
+	if env["OPENAI_API_KEY"] != "test-key-123" {
+		t.Errorf("expected OPENAI_API_KEY=test-key-123, got %s", env["OPENAI_API_KEY"])
+	}
+}
+
+func TestService_ActivateForAgent_NotFound(t *testing.T) {
+	cfg := config.DefaultConfig()
+	ctx := context.Background()
+
+	service := NewService(cfg)
+
+	_, err := service.ActivateForAgent(ctx, "nonexistent", "agent-1")
+	if !errors.Is(err, ErrAccountNotFound) {
+		t.Errorf("expected ErrAccountNotFound, got %v", err)
+	}
+}
+
+func TestAdapterToProvider(t *testing.T) {
+	tests := []struct {
+		adapter  vault.Adapter
+		expected models.Provider
+	}{
+		{vault.AdapterClaude, models.ProviderAnthropic},
+		{vault.AdapterCodex, models.ProviderOpenAI},
+		{vault.AdapterGemini, models.ProviderGoogle},
+		{vault.AdapterOpenCode, models.ProviderCustom},
+		{vault.Adapter("unknown"), ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.adapter), func(t *testing.T) {
+			got := adapterToProvider(tt.adapter)
+			if got != tt.expected {
+				t.Errorf("adapterToProvider(%s) = %s, want %s", tt.adapter, got, tt.expected)
+			}
+		})
 	}
 }
