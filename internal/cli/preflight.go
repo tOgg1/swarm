@@ -62,6 +62,7 @@ func runPreflight(cmd *cobra.Command) error {
 	if err := checkDatabase(ctx); err != nil {
 		return err
 	}
+	maybeAutoRegisterLocalNode(ctx)
 	maybeAutoImportWorkspaces(ctx)
 	if err := checkWorkspacePath(cmd); err != nil {
 		return err
@@ -109,6 +110,54 @@ func maybeAutoImportWorkspaces(ctx context.Context) {
 	if failed := len(report.Failures); failed > 0 {
 		logger.Warn().Int("count", failed).Msg("some tmux sessions failed to import")
 	}
+}
+
+func maybeAutoRegisterLocalNode(ctx context.Context) {
+	if appConfig == nil || !appConfig.Global.AutoRegisterLocalNode {
+		return
+	}
+
+	database, err := openDatabase()
+	if err != nil {
+		return
+	}
+	defer database.Close()
+
+	nodeRepo := db.NewNodeRepository(database)
+	nodeService := node.NewService(nodeRepo)
+
+	// Check if a local node already exists
+	nodes, err := nodeService.ListNodes(ctx, nil)
+	if err != nil {
+		return
+	}
+	for _, n := range nodes {
+		if n.IsLocal {
+			return // Already have a local node
+		}
+	}
+
+	// Determine hostname for node name
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "local"
+	}
+
+	// Create local node
+	localNode := &models.Node{
+		Name:    hostname,
+		IsLocal: true,
+		Status:  models.NodeStatusOnline,
+	}
+
+	if err := nodeService.AddNode(ctx, localNode, false); err != nil {
+		if !errors.Is(err, node.ErrNodeAlreadyExists) {
+			logger.Warn().Err(err).Msg("failed to auto-register local node")
+		}
+		return
+	}
+
+	logger.Info().Str("name", hostname).Msg("auto-registered local node")
 }
 
 func shouldRunPreflight(cmd *cobra.Command) bool {

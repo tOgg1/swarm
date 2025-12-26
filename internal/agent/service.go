@@ -189,8 +189,9 @@ func (s *Service) SpawnAgent(ctx context.Context, opts SpawnOptions) (*models.Ag
 		return nil, fmt.Errorf("%w: failed to create pane: %v", ErrSpawnFailed, err)
 	}
 
-	// Build pane target (session:window.pane format)
-	paneTarget := fmt.Sprintf("%s:%s", ws.TmuxSession, paneID)
+	// Use the global pane ID directly as the target.
+	// Pane IDs like %123 are globally unique in tmux and work as-is.
+	paneTarget := paneID
 
 	// Create agent record
 	agent := &models.Agent{
@@ -765,7 +766,8 @@ func (s *Service) RestartAgentWithAccount(ctx context.Context, id, accountID str
 		return nil, fmt.Errorf("%w: failed to create pane: %v", ErrSpawnFailed, err)
 	}
 
-	paneTarget := fmt.Sprintf("%s:%s", ws.TmuxSession, paneID)
+	// Use the global pane ID directly as the target.
+	paneTarget := paneID
 
 	now := time.Now().UTC()
 	agent.TmuxPane = paneTarget

@@ -49,12 +49,41 @@ func (l *Loader) Load() (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
+	// Expand ~ in paths
+	expandPaths(cfg)
+
 	// Validate
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
 	}
 
 	return cfg, nil
+}
+
+// expandTilde expands ~ to the user's home directory.
+func expandTilde(path string) string {
+	if path == "" {
+		return path
+	}
+	if path == "~" {
+		home, _ := os.UserHomeDir()
+		return home
+	}
+	if strings.HasPrefix(path, "~/") {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, path[2:])
+	}
+	return path
+}
+
+// expandPaths expands ~ in all path-related config fields.
+func expandPaths(cfg *Config) {
+	cfg.Global.DataDir = expandTilde(cfg.Global.DataDir)
+	cfg.Global.ConfigDir = expandTilde(cfg.Global.ConfigDir)
+	cfg.Database.Path = expandTilde(cfg.Database.Path)
+	cfg.Logging.File = expandTilde(cfg.Logging.File)
+	cfg.NodeDefaults.SSHKeyPath = expandTilde(cfg.NodeDefaults.SSHKeyPath)
+	cfg.EventRetention.ArchiveDir = expandTilde(cfg.EventRetention.ArchiveDir)
 }
 
 // setupViper configures Viper with defaults and environment bindings.

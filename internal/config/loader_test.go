@@ -217,3 +217,67 @@ tui:
 		t.Errorf("Expected tui.theme = 'high-contrast', got %q", cfg.TUI.Theme)
 	}
 }
+
+func TestExpandTilde(t *testing.T) {
+	home, _ := os.UserHomeDir()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "empty", input: "", expected: ""},
+		{name: "absolute path", input: "/var/log/test", expected: "/var/log/test"},
+		{name: "relative path", input: "data/file", expected: "data/file"},
+		{name: "tilde only", input: "~", expected: home},
+		{name: "tilde with path", input: "~/data/swarm", expected: filepath.Join(home, "data/swarm")},
+		{name: "tilde in middle", input: "/var/~/data", expected: "/var/~/data"}, // should not expand
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := expandTilde(tt.input)
+			if result != tt.expected {
+				t.Errorf("expandTilde(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestExpandPathsInConfig(t *testing.T) {
+	home, _ := os.UserHomeDir()
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+global:
+  data_dir: ~/.local/share/swarm
+  config_dir: ~/.config/swarm
+database:
+  path: ~/custom/db.sqlite
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+
+	cfg, err := LoadFromFile(configPath)
+	if err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+
+	expectedDataDir := filepath.Join(home, ".local/share/swarm")
+	if cfg.Global.DataDir != expectedDataDir {
+		t.Errorf("DataDir = %q, want %q", cfg.Global.DataDir, expectedDataDir)
+	}
+
+	expectedConfigDir := filepath.Join(home, ".config/swarm")
+	if cfg.Global.ConfigDir != expectedConfigDir {
+		t.Errorf("ConfigDir = %q, want %q", cfg.Global.ConfigDir, expectedConfigDir)
+	}
+
+	expectedDBPath := filepath.Join(home, "custom/db.sqlite")
+	if cfg.Database.Path != expectedDBPath {
+		t.Errorf("Database.Path = %q, want %q", cfg.Database.Path, expectedDBPath)
+	}
+}
