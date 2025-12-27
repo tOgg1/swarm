@@ -184,9 +184,9 @@ func (r *PortRepository) ReleaseByAgent(ctx context.Context, agentID string) (in
 // GetByAgent retrieves the active port allocation for an agent.
 func (r *PortRepository) GetByAgent(ctx context.Context, agentID string) (*PortAllocation, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT id, port, node_id, agent_id, reason, allocated_at, released_at
+		SELECT id, port, node_id, agent_id, reason, allocated_at
 		FROM port_allocations
-		WHERE agent_id = ? AND released_at IS NULL
+		WHERE agent_id = ?
 		ORDER BY allocated_at DESC
 		LIMIT 1
 	`, agentID)
@@ -197,9 +197,9 @@ func (r *PortRepository) GetByAgent(ctx context.Context, agentID string) (*PortA
 // GetByNodeAndPort retrieves an active port allocation by node and port.
 func (r *PortRepository) GetByNodeAndPort(ctx context.Context, nodeID string, port int) (*PortAllocation, error) {
 	row := r.db.QueryRowContext(ctx, `
-		SELECT id, port, node_id, agent_id, reason, allocated_at, released_at
+		SELECT id, port, node_id, agent_id, reason, allocated_at
 		FROM port_allocations
-		WHERE node_id = ? AND port = ? AND released_at IS NULL
+		WHERE node_id = ? AND port = ?
 	`, nodeID, port)
 
 	return r.scanAllocation(row)

@@ -255,7 +255,10 @@ If --workspace is not specified, the workspace is resolved from:
 var agentListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List agents",
-	Long:  "List all agents managed by Swarm.",
+	Long: `List all agents managed by Swarm.
+
+If --workspace is not specified, filters by workspace from context (if set).
+Use --workspace="" to list all agents across workspaces.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
 
@@ -280,12 +283,19 @@ var agentListCmd = &cobra.Command{
 			IncludeQueueLength: true,
 		}
 
+		// Use context resolution for workspace filter (optional - just for filtering)
 		if agentListWorkspace != "" {
 			ws, err := findWorkspace(ctx, wsRepo, agentListWorkspace)
 			if err != nil {
 				return err
 			}
 			opts.WorkspaceID = ws.ID
+		} else if !cmd.Flags().Changed("workspace") {
+			// Use context if flag wasn't explicitly set
+			resolved, _ := ResolveWorkspaceContext(ctx, wsRepo, "")
+			if resolved != nil && resolved.WorkspaceID != "" {
+				opts.WorkspaceID = resolved.WorkspaceID
+			}
 		}
 
 		if agentListState != "" {
