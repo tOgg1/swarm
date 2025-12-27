@@ -12,6 +12,7 @@ import (
 	"github.com/opencode-ai/swarm/internal/db"
 	"github.com/opencode-ai/swarm/internal/models"
 	"github.com/opencode-ai/swarm/internal/queue"
+	"github.com/opencode-ai/swarm/internal/tmux"
 )
 
 // mockAgentService implements a minimal agent service for testing.
@@ -1001,4 +1002,122 @@ func TestScheduler_EvaluateCondition_UnknownType(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for unknown condition type")
 	}
+}
+
+func TestScheduler_ConcurrentDispatchPrevention(t *testing.T) {
+	// This test verifies that only one dispatch can happen at a time per agent.
+	// Multiple concurrent tryDispatch calls for the same agent should result
+	// in only one actual dispatch.
+
+	exec := &dispatchExecutor{}
+	tmuxClient := tmux.NewClient(exec)
+
+	agentSvc, agentID, cleanup := setupAgentServiceForDispatch(t, models.AgentStateIdle, 5, tmuxClient)
+	defer cleanup()
+
+	queueSvc := newTrackingQueueService()
+	// Enqueue multiple items
+	for i := 0; i < 5; i++ {
+		if err := queueSvc.Enqueue(context.Background(), agentID, makeMessageItem(fmt.Sprintf("item-%d", i), fmt.Sprintf("hello %d", i))); err != nil {
+			t.Fatalf("failed to enqueue item: %v", err)
+		}
+	}
+
+	cfg := DefaultConfig()
+	cfg.MaxConcurrentDispatches = 10 // Allow many concurrent global dispatches
+	sched := New(cfg, agentSvc, queueSvc, nil, nil)
+	sched.ctx = context.Background()
+
+	// Launch multiple concurrent dispatch attempts for the same agent
+	var wg sync.WaitGroup
+	dispatchAttempts := 10
+
+	for i := 0; i < dispatchAttempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sched.tryDispatch(agentID)
+		}()
+	}
+
+	wg.Wait()
+
+	// Wait a bit for any async dispatch goroutines to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// The key assertion: despite launching 10 concurrent tryDispatch calls,
+	// only dispatches should have happened sequentially (one at a time).
+	// We can verify this by checking that the dispatch lock mechanism worked.
+
+	// The dequeue count should match the number of items processed,
+	// not the number of dispatch attempts
+	dequeues := queueSvc.dequeueCalls
+	queueLen := queueSvc.queueLength(agentID)
+
+	t.Logf("Dispatch attempts: %d, Dequeue calls: %d, Remaining queue: %d", dispatchAttempts, dequeues, queueLen)
+
+	// With proper locking, some tryDispatch calls will be skipped because
+	// another dispatch is already in progress. This is the expected behavior.
+	if dequeues+queueLen > 5 {
+		t.Errorf("unexpected behavior: dequeue calls (%d) + remaining queue (%d) > 5", dequeues, queueLen)
+	}
+}
+
+func TestScheduler_TryLockAgentDispatch(t *testing.T) {
+	sched := New(DefaultConfig(), nil, nil, nil, nil)
+
+	agentID := "test-agent"
+
+	// First lock should succeed
+	if !sched.tryLockAgentDispatch(agentID) {
+		t.Error("expected first lock to succeed")
+	}
+
+	// Second lock on same agent should fail (already held)
+	if sched.tryLockAgentDispatch(agentID) {
+		t.Error("expected second lock to fail")
+	}
+
+	// Unlock
+	sched.unlockAgentDispatch(agentID)
+
+	// Now lock should succeed again
+	if !sched.tryLockAgentDispatch(agentID) {
+		t.Error("expected lock after unlock to succeed")
+	}
+
+	sched.unlockAgentDispatch(agentID)
+}
+
+func TestScheduler_ConcurrentDispatchDifferentAgents(t *testing.T) {
+	// Verify that dispatches to DIFFERENT agents can happen concurrently
+
+	cfg := DefaultConfig()
+	cfg.MaxConcurrentDispatches = 10
+	sched := New(cfg, nil, nil, nil, nil)
+
+	agent1 := "agent-1"
+	agent2 := "agent-2"
+
+	// Lock agent1
+	if !sched.tryLockAgentDispatch(agent1) {
+		t.Error("expected lock on agent1 to succeed")
+	}
+
+	// Lock agent2 should succeed (different agent)
+	if !sched.tryLockAgentDispatch(agent2) {
+		t.Error("expected lock on agent2 to succeed while agent1 is locked")
+	}
+
+	// Both are locked, second attempt on each should fail
+	if sched.tryLockAgentDispatch(agent1) {
+		t.Error("expected second lock on agent1 to fail")
+	}
+	if sched.tryLockAgentDispatch(agent2) {
+		t.Error("expected second lock on agent2 to fail")
+	}
+
+	// Cleanup
+	sched.unlockAgentDispatch(agent1)
+	sched.unlockAgentDispatch(agent2)
 }

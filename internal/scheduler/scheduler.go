@@ -155,6 +155,10 @@ type Scheduler struct {
 	pausedAgents map[string]struct{}
 	retryAfter   map[string]time.Time
 
+	// Per-agent dispatch locks to prevent concurrent dispatch to the same agent.
+	// Key: agentID, Value: mutex for that agent's dispatch operations.
+	agentDispatchMu sync.Map // map[string]*sync.Mutex
+
 	// Stats
 	stats      SchedulerStats
 	statsMu    sync.RWMutex
@@ -417,6 +421,26 @@ func (s *Scheduler) isRetryBackoffActive(agentID string) bool {
 	return false
 }
 
+// getAgentDispatchMutex returns the mutex for dispatching to a specific agent.
+// Creates a new mutex if one doesn't exist for this agent.
+func (s *Scheduler) getAgentDispatchMutex(agentID string) *sync.Mutex {
+	actual, _ := s.agentDispatchMu.LoadOrStore(agentID, &sync.Mutex{})
+	return actual.(*sync.Mutex)
+}
+
+// tryLockAgentDispatch attempts to acquire the dispatch lock for an agent.
+// Returns true if the lock was acquired, false if another dispatch is in progress.
+func (s *Scheduler) tryLockAgentDispatch(agentID string) bool {
+	mu := s.getAgentDispatchMutex(agentID)
+	return mu.TryLock()
+}
+
+// unlockAgentDispatch releases the dispatch lock for an agent.
+func (s *Scheduler) unlockAgentDispatch(agentID string) {
+	mu := s.getAgentDispatchMutex(agentID)
+	mu.Unlock()
+}
+
 // Stats returns current scheduler statistics.
 func (s *Scheduler) Stats() SchedulerStats {
 	s.statsMu.RLock()
@@ -547,11 +571,26 @@ func (s *Scheduler) isEligibleForDispatch(a *models.Agent) bool {
 
 // tryDispatch attempts to dispatch the next item to an agent.
 func (s *Scheduler) tryDispatch(agentID string) {
-	// Acquire dispatch semaphore
+	// Try to acquire the per-agent dispatch lock first.
+	// This ensures only one dispatch happens per agent at a time.
+	if !s.tryLockAgentDispatch(agentID) {
+		// Another dispatch is already in progress for this agent.
+		// This is expected behavior, not an error.
+		s.logger.Debug().
+			Str("agent_id", agentID).
+			Msg("dispatch skipped: another dispatch already in progress for this agent")
+		return
+	}
+
+	// Acquire global dispatch semaphore to limit total concurrent dispatches
 	select {
 	case s.dispatchSem <- struct{}{}:
 	default:
-		// Max concurrent dispatches reached
+		// Max concurrent dispatches reached, release agent lock
+		s.unlockAgentDispatch(agentID)
+		s.logger.Debug().
+			Str("agent_id", agentID).
+			Msg("dispatch skipped: max concurrent dispatches reached")
 		return
 	}
 
@@ -559,6 +598,7 @@ func (s *Scheduler) tryDispatch(agentID string) {
 	go func() {
 		defer s.wg.Done()
 		defer func() { <-s.dispatchSem }()
+		defer s.unlockAgentDispatch(agentID)
 
 		s.dispatchToAgent(agentID)
 	}()
