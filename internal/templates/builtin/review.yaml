@@ -1,0 +1,7 @@
+name: review
+description: Request a review
+message: |
+  Review the recent changes and provide feedback. Focus on
+  correctness, edge cases, and any missing tests.
+tags:
+  - review

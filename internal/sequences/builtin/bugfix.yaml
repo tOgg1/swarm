@@ -1,0 +1,20 @@
+name: bugfix
+description: Standard bug fix workflow
+variables:
+  - name: issue_id
+    description: Issue identifier or URL
+    required: true
+steps:
+  - type: message
+    content: "Find and fix the bug described in issue {{.issue_id}}."
+  - type: pause
+    duration: 30s
+    reason: "Wait for initial analysis"
+  - type: conditional
+    when: idle
+    message: "Run the tests and report results."
+  - type: pause
+    duration: 30s
+    reason: "Wait for tests to finish"
+  - type: message
+    content: "Commit the fix with a clear summary."

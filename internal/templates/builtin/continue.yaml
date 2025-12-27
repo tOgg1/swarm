@@ -1,0 +1,7 @@
+name: continue
+description: Resume current task
+message: |
+  Continue working on the current task. If you are blocked,
+  explain what you need to proceed.
+tags:
+  - resume

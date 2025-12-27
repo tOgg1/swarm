@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/opencode-ai/swarm/internal/db"
-
+	"github.com/opencode-ai/swarm/internal/models"
 	"github.com/opencode-ai/swarm/internal/queue"
 	"github.com/opencode-ai/swarm/internal/sequences"
 	"github.com/spf13/cobra"

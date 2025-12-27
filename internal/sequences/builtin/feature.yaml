@@ -1,0 +1,19 @@
+name: feature
+description: Implement, test, and document a feature
+variables:
+  - name: feature_name
+    description: Feature name or short description
+    required: true
+steps:
+  - type: message
+    content: "Implement the feature: {{.feature_name}}."
+  - type: pause
+    duration: 30s
+    reason: "Allow initial implementation time"
+  - type: conditional
+    when: idle
+    message: "Run tests and report results for {{.feature_name}}."
+  - type: message
+    content: "Update documentation for {{.feature_name}} and summarize changes."
+  - type: message
+    content: "Commit the feature with a descriptive message."

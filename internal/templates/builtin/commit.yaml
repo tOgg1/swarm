@@ -1,0 +1,7 @@
+name: commit
+description: Commit changes
+message: |
+  Commit your changes with a concise, descriptive message.
+  Include tests run and any relevant notes.
+tags:
+  - git

@@ -1,0 +1,16 @@
+name: review-loop
+description: Review, address feedback, and re-review
+steps:
+  - type: message
+    content: "Review the latest changes and list any issues or risks."
+  - type: pause
+    duration: 30s
+    reason: "Allow time for review"
+  - type: conditional
+    when: idle
+    message: "Address the review feedback and summarize the fixes."
+  - type: pause
+    duration: 20s
+    reason: "Allow time for fixes"
+  - type: message
+    content: "Re-review and provide a final summary."

@@ -1,0 +1,7 @@
+name: explain
+description: Explain current status
+message: |
+  Summarize what you have done so far, the current state,
+  and the next steps. Note any blockers.
+tags:
+  - status

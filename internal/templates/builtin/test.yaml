@@ -1,0 +1,7 @@
+name: test
+description: Run tests
+message: |
+  Run the test suite and report results. If tests fail,
+  summarize the failures and likely causes.
+tags:
+  - test
