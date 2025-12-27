@@ -3,7 +3,9 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -13,7 +15,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/opencode-ai/swarm/internal/models"
+	"github.com/opencode-ai/swarm/internal/sequences"
 	"github.com/opencode-ai/swarm/internal/state"
+	"github.com/opencode-ai/swarm/internal/templates"
 	"github.com/opencode-ai/swarm/internal/tui/components"
 	"github.com/opencode-ai/swarm/internal/tui/styles"
 )
@@ -87,91 +91,105 @@ func RunWithConfig(cfg Config) error {
 }
 
 type model struct {
-	width                  int
-	height                 int
-	styles                 styles.Styles
-	view                   viewID
-	selectedView           viewID
-	showHelp               bool
-	showInspector          bool
-	selectedAgent          string
-	selectedAgentIndex     int
-	pausedAll              bool
-	statusMsg              string
-	statusSeverity         statusSeverity
-	statusExpiresAt        time.Time
-	searchOpen             bool
-	searchQuery            string
-	searchPrevQuery        string
-	searchTarget           viewID
-	agentFilter            string
-	approvalsOpen          bool
-	approvalsByWorkspace   map[string][]approvalItem
-	approvalsSelected      int
-	approvalsMarked        map[string]map[string]bool
-	approvalsBulkConfirm   bool
-	approvalsBulkAction    models.ApprovalStatus
-	approvalsBulkTargets   []string
-	approvalsBulkWorkspace string
-	auditItems             []auditItem
-	auditFilter            string
-	auditSelected          int
-	mailThreads            []mailThread
-	mailFilter             string
-	mailSelected           int
-	mailClient             *agentMailClient
-	mailPollInterval       time.Duration
-	mailSyncErr            string
-	mailLastSynced         time.Time
-	mailRead               map[string]bool
-	actionConfirmOpen      bool
-	actionConfirmAction    string
-	actionConfirmAgent     string
-	profileSelectOpen      bool
-	profileSelectIndex     int
-	profileSelectOptions   []string
-	profileSelectAgent     string
-	profileSwitchPending   string
-	actionInFlightAction   string
-	actionInFlightAgent    string
-	queueEditorOpen        bool
-	queueEditors           map[string]*queueEditorState
-	queueEditOpen          bool
-	queueEditBuffer        string
-	queueEditIndex         int
-	queueEditAgent         string
-	queueEditMode          queueEditMode
-	queueEditKind          models.QueueItemType
-	queueEditPrompt        string
-	transcriptSearchOpen   bool
-	transcriptSearchQuery  string
-	paletteOpen            bool
-	paletteQuery           string
-	paletteIndex           int
-	lastUpdated            time.Time
-	refreshingUntil        time.Time
-	stale                  bool
-	stateEngine            *state.Engine
-	agentStates            map[string]models.AgentState
-	agentInfo              map[string]models.StateInfo
-	agentLast              map[string]time.Time
-	agentCooldowns         map[string]time.Time
-	agentRecentEvents      map[string][]time.Time // Recent state change timestamps per agent
-	workspaceRecentEvents  map[string][]time.Time // Recent state change timestamps per workspace
-	agentWorkspaces        map[string]string      // Cached workspace IDs per agent
-	agentProfileOverrides  map[string]string
-	stateChanges           []StateChangeMsg
-	nodes                  []nodeSummary
-	nodesPreview           bool
-	workspacesPreview      bool
-	workspaceGrid          *components.WorkspaceGrid
-	beadsCache             map[string]beadsSnapshot
-	selectedWsID           string // Selected workspace ID for drill-down
-	pulseFrame             int
-	transcriptViewer       *components.TranscriptViewer
-	transcriptPreview      bool
-	showTranscript         bool
-	transcriptAutoScroll   bool
+	width                      int
+	height                     int
+	styles                     styles.Styles
+	view                       viewID
+	selectedView               viewID
+	showHelp                   bool
+	showInspector              bool
+	selectedAgent              string
+	selectedAgentIndex         int
+	pausedAll                  bool
+	statusMsg                  string
+	statusSeverity             statusSeverity
+	statusExpiresAt            time.Time
+	searchOpen                 bool
+	searchQuery                string
+	searchPrevQuery            string
+	searchTarget               viewID
+	agentFilter                string
+	approvalsOpen              bool
+	approvalsByWorkspace       map[string][]approvalItem
+	approvalsSelected          int
+	approvalsMarked            map[string]map[string]bool
+	approvalsBulkConfirm       bool
+	approvalsBulkAction        models.ApprovalStatus
+	approvalsBulkTargets       []string
+	approvalsBulkWorkspace     string
+	auditItems                 []auditItem
+	auditFilter                string
+	auditSelected              int
+	mailThreads                []mailThread
+	mailFilter                 string
+	mailSelected               int
+	mailClient                 *agentMailClient
+	mailPollInterval           time.Duration
+	mailSyncErr                string
+	mailLastSynced             time.Time
+	mailRead                   map[string]bool
+	actionConfirmOpen          bool
+	actionConfirmAction        string
+	actionConfirmAgent         string
+	profileSelectOpen          bool
+	profileSelectIndex         int
+	profileSelectOptions       []string
+	profileSelectAgent         string
+	profileSwitchPending       string
+	actionInFlightAction       string
+	actionInFlightAgent        string
+	queueEditorOpen            bool
+	queueEditors               map[string]*queueEditorState
+	queueEditOpen              bool
+	queueEditBuffer            string
+	queueEditIndex             int
+	queueEditAgent             string
+	queueEditMode              queueEditMode
+	queueEditKind              models.QueueItemType
+	queueEditPrompt            string
+	transcriptSearchOpen       bool
+	transcriptSearchQuery      string
+	paletteOpen                bool
+	paletteQuery               string
+	paletteIndex               int
+	messagePaletteOpen         bool
+	messagePaletteStage        messagePaletteStage
+	messagePalette             *components.MessagePalette
+	messagePaletteTemplates    map[string]*templates.Template
+	messagePaletteSequences    map[string]*sequences.Sequence
+	messagePaletteSelection    messagePaletteSelection
+	messagePaletteTargetAgent  string
+	messagePaletteAgents       []string
+	messagePaletteAgentIndex   int
+	messagePaletteVarIndex     int
+	messagePaletteVarBuffer    string
+	messagePaletteVarList      []messagePaletteVar
+	messagePaletteVars         map[string]string
+	messagePaletteEnqueueIndex int
+	lastUpdated                time.Time
+	refreshingUntil            time.Time
+	stale                      bool
+	stateEngine                *state.Engine
+	agentStates                map[string]models.AgentState
+	agentInfo                  map[string]models.StateInfo
+	agentLast                  map[string]time.Time
+	agentCooldowns             map[string]time.Time
+	agentRecentEvents          map[string][]time.Time // Recent state change timestamps per agent
+	workspaceRecentEvents      map[string][]time.Time // Recent state change timestamps per workspace
+	agentWorkspaces            map[string]string      // Cached workspace IDs per agent
+	agentProfileOverrides      map[string]string
+	stateChanges               []StateChangeMsg
+	nodes                      []nodeSummary
+	nodesPreview               bool
+	workspacesPreview          bool
+	workspaceGrid              *components.WorkspaceGrid
+	beadsCache                 map[string]beadsSnapshot
+	selectedWsID               string // Selected workspace ID for drill-down
+	pulseFrame                 int
+	transcriptViewer           *components.TranscriptViewer
+	transcriptPreview          bool
+	showTranscript             bool
+	transcriptAutoScroll       bool
 }
 
 type nodeSummary struct {
@@ -202,6 +220,42 @@ const (
 	queueEditModeEdit queueEditMode = iota
 	queueEditModeAdd
 )
+
+type messagePaletteStage int
+
+const (
+	messagePaletteStageList messagePaletteStage = iota
+	messagePaletteStageAgent
+	messagePaletteStageVars
+	messagePaletteStageEnqueue
+)
+
+type messagePaletteEnqueueMode int
+
+const (
+	messagePaletteEnqueueEnd messagePaletteEnqueueMode = iota
+	messagePaletteEnqueueFront
+	messagePaletteEnqueueAfterCooldown
+	messagePaletteEnqueueWhenIdle
+)
+
+type messagePaletteSelection struct {
+	Kind components.MessagePaletteKind
+	Name string
+}
+
+type messagePaletteVar struct {
+	Name        string
+	Description string
+	Default     string
+	Required    bool
+}
+
+type messagePaletteEnqueueOption struct {
+	Mode        messagePaletteEnqueueMode
+	Label       string
+	Description string
+}
 
 type queueEditorState struct {
 	Items    []queueItem
@@ -286,6 +340,8 @@ func initialModel() model {
 		mailThreads:           nil, // empty until loaded
 		mailSelected:          0,
 		mailRead:              make(map[string]bool),
+		messagePalette:        components.NewMessagePalette(),
+		messagePaletteVars:    make(map[string]string),
 		transcriptViewer:      tv,
 		transcriptPreview:     false,
 		transcriptAutoScroll:  true,
@@ -311,6 +367,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.approvalsBulkConfirm && m.view == viewWorkspace {
 			return m.updateBulkApprovalConfirm(msg)
+		}
+		if m.messagePaletteOpen {
+			return m.updateMessagePalette(msg)
 		}
 		if m.paletteOpen {
 			return m.updatePalette(msg)
@@ -587,6 +646,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "ctrl+k", ":":
 			m.openPalette()
+		case "ctrl+p":
+			m.openMessagePalette()
 		case "ctrl+l":
 			if m.view == viewWorkspace || m.view == viewAgent || m.view == viewAudit || m.view == viewMailbox {
 				m.clearSearchFilter(m.view)
@@ -733,7 +794,10 @@ func (m model) View() string {
 	}
 	lines = append(lines, "")
 
-	if m.paletteOpen {
+	if m.messagePaletteOpen {
+		lines = append(lines, m.messagePaletteLines()...)
+		lines = append(lines, "")
+	} else if m.paletteOpen {
 		lines = append(lines, m.paletteLines()...)
 		lines = append(lines, "")
 	}
@@ -2860,6 +2924,9 @@ func (m model) navLabel(view viewID) string {
 }
 
 func (m model) modeLine() string {
+	if m.messagePaletteOpen {
+		return m.styles.Info.Render(fmt.Sprintf("Mode: %s", m.messagePaletteModeLabel()))
+	}
 	if m.paletteOpen {
 		return m.styles.Info.Render("Mode: Palette")
 	}
@@ -2885,7 +2952,7 @@ func (m model) demoBadgeLine() string {
 }
 
 func (m model) footerLine() string {
-	return m.styles.Muted.Render("Keys: ? help | ctrl+k palette | q quit")
+	return m.styles.Muted.Render("Keys: ? help | ctrl+k palette | ctrl+p message | q quit")
 }
 
 func viewLabel(view viewID) string {
@@ -2909,6 +2976,19 @@ func viewLabel(view viewID) string {
 
 func (m model) helpLines() []string {
 	lines := []string{m.styles.Accent.Render("Help")}
+	if m.messagePaletteOpen {
+		switch m.messagePaletteStage {
+		case messagePaletteStageAgent:
+			lines = append(lines, m.styles.Muted.Render("Message palette (agent): ↑↓ move | Enter select | Esc cancel"))
+		case messagePaletteStageVars:
+			lines = append(lines, m.styles.Muted.Render("Message palette (vars): type value | Enter next | Esc cancel"))
+		case messagePaletteStageEnqueue:
+			lines = append(lines, m.styles.Muted.Render("Message palette (enqueue): ↑↓ move | Enter confirm | Esc cancel"))
+		default:
+			lines = append(lines, m.styles.Muted.Render("Message palette: type to filter | Enter select | Tab section | Esc close | / focus search"))
+		}
+		return lines
+	}
 	if m.paletteOpen {
 		lines = append(lines, m.styles.Muted.Render("Palette: type to filter | Enter run | Esc close | ! show disabled"))
 		return lines
@@ -2948,7 +3028,7 @@ func (m model) helpLines() []string {
 		lines = append(lines, m.styles.Muted.Render("Agent detail: p profile | I interrupt | R restart | P pause | Esc back"))
 	}
 
-	lines = append(lines, m.styles.Muted.Render("Global: ctrl+k palette | i/tab inspector | ? help | q quit"))
+	lines = append(lines, m.styles.Muted.Render("Global: ctrl+k palette | ctrl+p message | i/tab inspector | ? help | q quit"))
 	return lines
 }
 
@@ -2972,6 +3052,738 @@ func (m *model) closePalette() {
 	m.paletteOpen = false
 	m.paletteQuery = ""
 	m.paletteIndex = 0
+}
+
+func (m *model) openMessagePalette() {
+	if m.messagePalette == nil {
+		m.messagePalette = components.NewMessagePalette()
+	}
+
+	m.paletteOpen = false
+	m.searchOpen = false
+	m.transcriptSearchOpen = false
+
+	projectDir := m.messagePaletteProjectDir()
+	templateItems, templateMap, templateErr := messagePaletteTemplateItems(projectDir)
+	if templateErr != nil {
+		m.setStatus(fmt.Sprintf("Template load failed: %v", templateErr), statusWarn)
+	}
+	sequenceItems, sequenceMap, sequenceErr := messagePaletteSequenceItems(projectDir)
+	if sequenceErr != nil {
+		m.setStatus(fmt.Sprintf("Sequence load failed: %v", sequenceErr), statusWarn)
+	}
+
+	m.messagePaletteTemplates = templateMap
+	m.messagePaletteSequences = sequenceMap
+	m.messagePalette.SetTemplates(templateItems)
+	m.messagePalette.SetSequences(sequenceItems)
+	m.messagePalette.Reset()
+	m.messagePaletteOpen = true
+	m.messagePaletteStage = messagePaletteStageList
+	m.messagePaletteSelection = messagePaletteSelection{}
+	m.messagePaletteTargetAgent = ""
+	m.messagePaletteAgents = nil
+	m.messagePaletteAgentIndex = 0
+	m.messagePaletteVarIndex = 0
+	m.messagePaletteVarBuffer = ""
+	m.messagePaletteVarList = nil
+	m.messagePaletteVars = make(map[string]string)
+	m.messagePaletteEnqueueIndex = 0
+}
+
+func (m *model) closeMessagePalette() {
+	m.messagePaletteOpen = false
+	m.messagePaletteStage = messagePaletteStageList
+	m.messagePaletteSelection = messagePaletteSelection{}
+	m.messagePaletteTargetAgent = ""
+	m.messagePaletteAgents = nil
+	m.messagePaletteAgentIndex = 0
+	m.messagePaletteVarIndex = 0
+	m.messagePaletteVarBuffer = ""
+	m.messagePaletteVarList = nil
+	m.messagePaletteVars = nil
+	m.messagePaletteEnqueueIndex = 0
+	if m.messagePalette != nil {
+		m.messagePalette.Reset()
+	}
+}
+
+func (m model) messagePaletteModeLabel() string {
+	switch m.messagePaletteStage {
+	case messagePaletteStageAgent:
+		return "Message Palette (agent)"
+	case messagePaletteStageVars:
+		return "Message Palette (vars)"
+	case messagePaletteStageEnqueue:
+		return "Message Palette (enqueue)"
+	default:
+		return "Message Palette"
+	}
+}
+
+func (m model) messagePaletteLines() []string {
+	if m.messagePalette == nil {
+		return []string{m.styles.Warning.Render("Message palette unavailable.")}
+	}
+	switch m.messagePaletteStage {
+	case messagePaletteStageAgent:
+		return m.messagePaletteAgentLines()
+	case messagePaletteStageVars:
+		return m.messagePaletteVarLines()
+	case messagePaletteStageEnqueue:
+		return m.messagePaletteEnqueueLines()
+	default:
+		return m.messagePalette.Render(m.styles)
+	}
+}
+
+func (m *model) updateMessagePalette(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.messagePaletteStage {
+	case messagePaletteStageAgent:
+		return m.updateMessagePaletteAgent(msg)
+	case messagePaletteStageVars:
+		return m.updateMessagePaletteVars(msg)
+	case messagePaletteStageEnqueue:
+		return m.updateMessagePaletteEnqueue(msg)
+	default:
+		return m.updateMessagePaletteList(msg)
+	}
+}
+
+func (m *model) updateMessagePaletteList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.messagePalette == nil {
+		m.closeMessagePalette()
+		return m, nil
+	}
+
+	switch msg.Type {
+	case tea.KeyRunes:
+		m.messagePalette.Query += string(msg.Runes)
+		m.messagePalette.ResetIndex()
+	case tea.KeyBackspace, tea.KeyDelete:
+		m.messagePalette.Query = trimLastRune(m.messagePalette.Query)
+		m.messagePalette.ResetIndex()
+	}
+
+	switch msg.String() {
+	case "esc":
+		m.closeMessagePalette()
+	case "tab":
+		m.messagePalette.NextSection()
+	case "up", "k", "ctrl+p":
+		m.messagePalette.Move(-1)
+	case "down", "j", "ctrl+n":
+		m.messagePalette.Move(1)
+	case "/":
+		m.messagePalette.Query = ""
+		m.messagePalette.ResetIndex()
+	case "enter":
+		m.selectMessagePaletteItem()
+	case "ctrl+c":
+		return m, tea.Quit
+	}
+
+	m.messagePalette.ClampIndex()
+	return m, nil
+}
+
+func (m *model) selectMessagePaletteItem() {
+	if m.messagePalette == nil {
+		return
+	}
+	item := m.messagePalette.SelectedItem()
+	if item == nil {
+		m.closeMessagePalette()
+		m.setStatus("No template or sequence selected.", statusWarn)
+		return
+	}
+
+	m.messagePaletteSelection = messagePaletteSelection{
+		Kind: item.Kind,
+		Name: item.Name,
+	}
+
+	if m.hasExplicitAgentSelection() {
+		m.messagePaletteTargetAgent = m.selectedAgentName()
+		m.openMessagePaletteVariables()
+		return
+	}
+	m.openMessagePaletteAgentPicker()
+}
+
+func (m *model) openMessagePaletteAgentPicker() {
+	agents := m.messagePaletteAgentOptions()
+	if len(agents) == 0 {
+		m.setStatus("No agents available.", statusWarn)
+		m.closeMessagePalette()
+		return
+	}
+	m.messagePaletteAgents = agents
+	m.messagePaletteAgentIndex = 0
+	m.messagePaletteStage = messagePaletteStageAgent
+}
+
+func (m model) messagePaletteAgentLines() []string {
+	lines := []string{
+		m.styles.Accent.Render("Select agent"),
+		m.styles.Muted.Render("Enter to confirm. Esc to cancel."),
+	}
+	if len(m.messagePaletteAgents) == 0 {
+		lines = append(lines, m.styles.Warning.Render("No agents available."))
+		return lines
+	}
+	for idx, agent := range m.messagePaletteAgents {
+		label := fmt.Sprintf("  %s", agent)
+		if idx == m.messagePaletteAgentIndex {
+			lines = append(lines, m.styles.Focus.Render("> "+agent))
+			continue
+		}
+		lines = append(lines, m.styles.Muted.Render(label))
+	}
+	return lines
+}
+
+func (m *model) updateMessagePaletteAgent(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if len(m.messagePaletteAgents) == 0 {
+		m.closeMessagePalette()
+		return m, nil
+	}
+
+	switch msg.String() {
+	case "esc":
+		m.closeMessagePalette()
+	case "up", "k":
+		if m.messagePaletteAgentIndex > 0 {
+			m.messagePaletteAgentIndex--
+		}
+	case "down", "j":
+		if m.messagePaletteAgentIndex < len(m.messagePaletteAgents)-1 {
+			m.messagePaletteAgentIndex++
+		}
+	case "enter":
+		if m.messagePaletteAgentIndex < 0 || m.messagePaletteAgentIndex >= len(m.messagePaletteAgents) {
+			m.setStatus("No agent selected.", statusWarn)
+			return m, nil
+		}
+		m.messagePaletteTargetAgent = m.messagePaletteAgents[m.messagePaletteAgentIndex]
+		m.openMessagePaletteVariables()
+	case "ctrl+c":
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m *model) openMessagePaletteVariables() {
+	vars := m.messagePaletteVariables()
+	if len(vars) == 0 {
+		m.openMessagePaletteEnqueue()
+		return
+	}
+	m.messagePaletteVarList = vars
+	m.messagePaletteVarIndex = 0
+	m.messagePaletteVarBuffer = vars[0].Default
+	m.messagePaletteStage = messagePaletteStageVars
+	if m.messagePaletteVars == nil {
+		m.messagePaletteVars = make(map[string]string)
+	}
+}
+
+func (m model) messagePaletteVarLines() []string {
+	lines := []string{
+		m.styles.Accent.Render("Template variables"),
+		m.styles.Muted.Render("Enter to continue. Esc to cancel."),
+	}
+	if m.messagePaletteVarIndex < 0 || m.messagePaletteVarIndex >= len(m.messagePaletteVarList) {
+		lines = append(lines, m.styles.Warning.Render("No variables to edit."))
+		return lines
+	}
+	varDef := m.messagePaletteVarList[m.messagePaletteVarIndex]
+	title := varDef.Name
+	if varDef.Required {
+		title += " (required)"
+	}
+	lines = append(lines, m.styles.Text.Render(title))
+	if strings.TrimSpace(varDef.Description) != "" {
+		lines = append(lines, m.styles.Muted.Render(varDef.Description))
+	}
+	if strings.TrimSpace(varDef.Default) != "" {
+		lines = append(lines, m.styles.Muted.Render(fmt.Sprintf("Default: %s", varDef.Default)))
+	}
+	lines = append(lines, m.styles.Text.Render(fmt.Sprintf("> %s", m.messagePaletteVarBuffer)))
+	return lines
+}
+
+func (m *model) updateMessagePaletteVars(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.closeMessagePalette()
+		return m, nil
+	case "enter":
+		if m.messagePaletteVarIndex < 0 || m.messagePaletteVarIndex >= len(m.messagePaletteVarList) {
+			m.openMessagePaletteEnqueue()
+			return m, nil
+		}
+		varDef := m.messagePaletteVarList[m.messagePaletteVarIndex]
+		value := strings.TrimSpace(m.messagePaletteVarBuffer)
+		if value == "" {
+			value = strings.TrimSpace(varDef.Default)
+		}
+		if value == "" && varDef.Required {
+			m.setStatus(fmt.Sprintf("%s is required.", varDef.Name), statusWarn)
+			return m, nil
+		}
+		if m.messagePaletteVars == nil {
+			m.messagePaletteVars = make(map[string]string)
+		}
+		m.messagePaletteVars[varDef.Name] = value
+		m.messagePaletteVarIndex++
+		if m.messagePaletteVarIndex >= len(m.messagePaletteVarList) {
+			m.openMessagePaletteEnqueue()
+			return m, nil
+		}
+		m.messagePaletteVarBuffer = m.messagePaletteVarList[m.messagePaletteVarIndex].Default
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	}
+
+	switch msg.Type {
+	case tea.KeyRunes:
+		m.messagePaletteVarBuffer += string(msg.Runes)
+	case tea.KeyBackspace, tea.KeyDelete:
+		m.messagePaletteVarBuffer = trimLastRune(m.messagePaletteVarBuffer)
+	}
+	return m, nil
+}
+
+func (m *model) openMessagePaletteEnqueue() {
+	m.messagePaletteStage = messagePaletteStageEnqueue
+	m.messagePaletteEnqueueIndex = 0
+}
+
+func (m model) messagePaletteEnqueueLines() []string {
+	lines := []string{
+		m.styles.Accent.Render("Enqueue mode"),
+		m.styles.Muted.Render("Enter to enqueue. Esc to cancel."),
+	}
+	options := messagePaletteEnqueueOptions()
+	for idx, option := range options {
+		label := option.Label
+		if strings.TrimSpace(option.Description) != "" {
+			label = fmt.Sprintf("%s - %s", option.Label, option.Description)
+		}
+		if idx == m.messagePaletteEnqueueIndex {
+			lines = append(lines, m.styles.Focus.Render("> "+label))
+			continue
+		}
+		lines = append(lines, m.styles.Muted.Render("  "+label))
+	}
+	return lines
+}
+
+func (m *model) updateMessagePaletteEnqueue(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	options := messagePaletteEnqueueOptions()
+	switch msg.String() {
+	case "esc":
+		m.closeMessagePalette()
+		return m, nil
+	case "up", "k":
+		if m.messagePaletteEnqueueIndex > 0 {
+			m.messagePaletteEnqueueIndex--
+		}
+	case "down", "j":
+		if m.messagePaletteEnqueueIndex < len(options)-1 {
+			m.messagePaletteEnqueueIndex++
+		}
+	case "enter":
+		m.applyMessagePaletteSelection()
+		m.closeMessagePalette()
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m model) messagePaletteProjectDir() string {
+	if ws := m.selectedWorkspace(); ws != nil && strings.TrimSpace(ws.RepoPath) != "" {
+		return ws.RepoPath
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return cwd
+}
+
+func messagePaletteTemplateItems(projectDir string) ([]components.MessagePaletteItem, map[string]*templates.Template, error) {
+	templatesList, err := templates.LoadTemplatesFromSearchPaths(projectDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	items := make([]components.MessagePaletteItem, 0, len(templatesList))
+	byName := make(map[string]*templates.Template, len(templatesList))
+	for _, tmpl := range templatesList {
+		if tmpl == nil {
+			continue
+		}
+		name := strings.TrimSpace(tmpl.Name)
+		if name == "" {
+			continue
+		}
+		items = append(items, components.MessagePaletteItem{
+			Kind:        components.MessagePaletteKindTemplate,
+			Name:        name,
+			Description: strings.TrimSpace(tmpl.Description),
+			Tags:        tmpl.Tags,
+		})
+		byName[name] = tmpl
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+	})
+	return items, byName, nil
+}
+
+func messagePaletteSequenceItems(projectDir string) ([]components.MessagePaletteItem, map[string]*sequences.Sequence, error) {
+	sequencesList, err := sequences.LoadSequencesFromSearchPaths(projectDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	items := make([]components.MessagePaletteItem, 0, len(sequencesList))
+	byName := make(map[string]*sequences.Sequence, len(sequencesList))
+	for _, seq := range sequencesList {
+		if seq == nil {
+			continue
+		}
+		name := strings.TrimSpace(seq.Name)
+		if name == "" {
+			continue
+		}
+		items = append(items, components.MessagePaletteItem{
+			Kind:        components.MessagePaletteKindSequence,
+			Name:        name,
+			Description: strings.TrimSpace(seq.Description),
+			Tags:        seq.Tags,
+		})
+		byName[name] = seq
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+	})
+	return items, byName, nil
+}
+
+func (m model) messagePaletteAgentOptions() []string {
+	cards := m.allAgentCards()
+	if len(cards) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(cards))
+	names := make([]string, 0, len(cards))
+	for _, card := range cards {
+		name := strings.TrimSpace(card.Name)
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	return names
+}
+
+func (m model) hasExplicitAgentSelection() bool {
+	if strings.TrimSpace(m.selectedAgent) != "" {
+		return true
+	}
+	return m.selectedAgentIndex >= 0
+}
+
+func (m model) selectedAgentName() string {
+	card := m.selectedAgentCard()
+	if card == nil {
+		return ""
+	}
+	return strings.TrimSpace(card.Name)
+}
+
+func (m model) messagePaletteVariables() []messagePaletteVar {
+	selection := m.messagePaletteSelection
+	switch selection.Kind {
+	case components.MessagePaletteKindTemplate:
+		if m.messagePaletteTemplates == nil {
+			return nil
+		}
+		tmpl := m.messagePaletteTemplates[selection.Name]
+		if tmpl == nil {
+			return nil
+		}
+		vars := make([]messagePaletteVar, 0, len(tmpl.Variables))
+		for _, v := range tmpl.Variables {
+			vars = append(vars, messagePaletteVar{
+				Name:        v.Name,
+				Description: v.Description,
+				Default:     v.Default,
+				Required:    v.Required,
+			})
+		}
+		return vars
+	case components.MessagePaletteKindSequence:
+		if m.messagePaletteSequences == nil {
+			return nil
+		}
+		seq := m.messagePaletteSequences[selection.Name]
+		if seq == nil {
+			return nil
+		}
+		vars := make([]messagePaletteVar, 0, len(seq.Variables))
+		for _, v := range seq.Variables {
+			vars = append(vars, messagePaletteVar{
+				Name:        v.Name,
+				Description: v.Description,
+				Default:     v.Default,
+				Required:    v.Required,
+			})
+		}
+		return vars
+	default:
+		return nil
+	}
+}
+
+func messagePaletteEnqueueOptions() []messagePaletteEnqueueOption {
+	return []messagePaletteEnqueueOption{
+		{
+			Mode:        messagePaletteEnqueueEnd,
+			Label:       "End of queue",
+			Description: "Default",
+		},
+		{
+			Mode:        messagePaletteEnqueueFront,
+			Label:       "Front of queue",
+			Description: "Run next",
+		},
+		{
+			Mode:        messagePaletteEnqueueAfterCooldown,
+			Label:       "After cooldown",
+			Description: "Wait for cooldown to clear",
+		},
+		{
+			Mode:        messagePaletteEnqueueWhenIdle,
+			Label:       "When idle",
+			Description: "Send once agent is idle",
+		},
+	}
+}
+
+func (m model) messagePaletteEnqueueMode() messagePaletteEnqueueMode {
+	options := messagePaletteEnqueueOptions()
+	if m.messagePaletteEnqueueIndex < 0 || m.messagePaletteEnqueueIndex >= len(options) {
+		return messagePaletteEnqueueEnd
+	}
+	return options[m.messagePaletteEnqueueIndex].Mode
+}
+
+func (m *model) applyMessagePaletteSelection() {
+	agent := strings.TrimSpace(m.messagePaletteTargetAgent)
+	if agent == "" {
+		m.setStatus("No agent selected.", statusWarn)
+		return
+	}
+	items, label, err := m.messagePaletteQueueItems()
+	if err != nil {
+		m.setStatus(err.Error(), statusWarn)
+		return
+	}
+	if len(items) == 0 {
+		m.setStatus("No queue items generated.", statusWarn)
+		return
+	}
+	state := m.ensureQueueEditorState(agent)
+	if state == nil {
+		m.setStatus("Queue unavailable.", statusWarn)
+		return
+	}
+	queueItems := messagePaletteQueueItemsFromModels(state, items)
+	m.insertMessagePaletteItems(state, queueItems, m.messagePaletteEnqueueMode())
+	m.setStatus(fmt.Sprintf("Queued %s for %s.", label, agent), statusInfo)
+}
+
+func (m *model) messagePaletteQueueItems() ([]models.QueueItem, string, error) {
+	selection := m.messagePaletteSelection
+	switch selection.Kind {
+	case components.MessagePaletteKindTemplate:
+		tmpl := m.messagePaletteTemplates[selection.Name]
+		if tmpl == nil {
+			return nil, "", fmt.Errorf("template %q not found", selection.Name)
+		}
+		rendered, err := templates.RenderTemplate(tmpl, m.messagePaletteVars)
+		if err != nil {
+			return nil, "", err
+		}
+		mode := m.messagePaletteEnqueueMode()
+		item := messagePaletteQueueItemFromText(rendered, mode)
+		label := fmt.Sprintf("template %q", selection.Name)
+		return []models.QueueItem{item}, label, nil
+	case components.MessagePaletteKindSequence:
+		seq := m.messagePaletteSequences[selection.Name]
+		if seq == nil {
+			return nil, "", fmt.Errorf("sequence %q not found", selection.Name)
+		}
+		items, err := sequences.RenderSequence(seq, m.messagePaletteVars)
+		if err != nil {
+			return nil, "", err
+		}
+		items = messagePaletteGateSequence(items, m.messagePaletteEnqueueMode(), selection.Name)
+		label := fmt.Sprintf("sequence %q (%d steps)", selection.Name, len(items))
+		return items, label, nil
+	default:
+		return nil, "", fmt.Errorf("no selection")
+	}
+}
+
+func messagePaletteQueueItemFromText(text string, mode messagePaletteEnqueueMode) models.QueueItem {
+	if condType, ok := messagePaletteConditionType(mode); ok {
+		payload := models.ConditionalPayload{
+			ConditionType: condType,
+			Message:       text,
+		}
+		payloadBytes, _ := json.Marshal(payload)
+		return models.QueueItem{
+			Type:    models.QueueItemTypeConditional,
+			Status:  models.QueueItemStatusPending,
+			Payload: payloadBytes,
+		}
+	}
+	payload := models.MessagePayload{Text: text}
+	payloadBytes, _ := json.Marshal(payload)
+	return models.QueueItem{
+		Type:    models.QueueItemTypeMessage,
+		Status:  models.QueueItemStatusPending,
+		Payload: payloadBytes,
+	}
+}
+
+func messagePaletteGateSequence(items []models.QueueItem, mode messagePaletteEnqueueMode, name string) []models.QueueItem {
+	condType, ok := messagePaletteConditionType(mode)
+	if !ok || len(items) == 0 {
+		return items
+	}
+	if items[0].Type == models.QueueItemTypeMessage {
+		var payload models.MessagePayload
+		if err := json.Unmarshal(items[0].Payload, &payload); err == nil {
+			condPayload := models.ConditionalPayload{
+				ConditionType: condType,
+				Message:       payload.Text,
+			}
+			condBytes, _ := json.Marshal(condPayload)
+			items[0].Type = models.QueueItemTypeConditional
+			items[0].Payload = condBytes
+			items[0].Status = models.QueueItemStatusPending
+			return items
+		}
+	}
+	condPayload := models.ConditionalPayload{
+		ConditionType: condType,
+		Message:       fmt.Sprintf("Begin sequence: %s", name),
+	}
+	condBytes, _ := json.Marshal(condPayload)
+	gate := models.QueueItem{
+		Type:    models.QueueItemTypeConditional,
+		Status:  models.QueueItemStatusPending,
+		Payload: condBytes,
+	}
+	return append([]models.QueueItem{gate}, items...)
+}
+
+func messagePaletteConditionType(mode messagePaletteEnqueueMode) (models.ConditionType, bool) {
+	switch mode {
+	case messagePaletteEnqueueWhenIdle:
+		return models.ConditionTypeWhenIdle, true
+	case messagePaletteEnqueueAfterCooldown:
+		return models.ConditionTypeAfterCooldown, true
+	default:
+		return "", false
+	}
+}
+
+func messagePaletteQueueItemsFromModels(state *queueEditorState, items []models.QueueItem) []queueItem {
+	nextIndex := len(state.Items) + 1
+	out := make([]queueItem, 0, len(items))
+	for _, item := range items {
+		status := item.Status
+		if status == "" {
+			status = models.QueueItemStatusPending
+		}
+		out = append(out, queueItem{
+			ID:      fmt.Sprintf("q-%02d", nextIndex),
+			Kind:    item.Type,
+			Summary: messagePaletteQueueItemSummary(item),
+			Status:  status,
+		})
+		nextIndex++
+	}
+	return out
+}
+
+func (m *model) insertMessagePaletteItems(state *queueEditorState, items []queueItem, mode messagePaletteEnqueueMode) {
+	if state == nil || len(items) == 0 {
+		return
+	}
+	switch mode {
+	case messagePaletteEnqueueFront:
+		state.Items = append(items, state.Items...)
+		state.Selected = 0
+	default:
+		state.Items = append(state.Items, items...)
+		state.Selected = len(state.Items) - 1
+	}
+}
+
+func messagePaletteQueueItemSummary(item models.QueueItem) string {
+	switch item.Type {
+	case models.QueueItemTypeMessage:
+		var payload models.MessagePayload
+		if err := json.Unmarshal(item.Payload, &payload); err != nil {
+			return "invalid message payload"
+		}
+		return payload.Text
+	case models.QueueItemTypePause:
+		var payload models.PausePayload
+		if err := json.Unmarshal(item.Payload, &payload); err != nil {
+			return "invalid pause payload"
+		}
+		label := fmt.Sprintf("Pause %ds", payload.DurationSeconds)
+		if strings.TrimSpace(payload.Reason) != "" {
+			label += " - " + strings.TrimSpace(payload.Reason)
+		}
+		return label
+	case models.QueueItemTypeConditional:
+		var payload models.ConditionalPayload
+		if err := json.Unmarshal(item.Payload, &payload); err != nil {
+			return "invalid conditional payload"
+		}
+		prefix := ""
+		switch payload.ConditionType {
+		case models.ConditionTypeWhenIdle:
+			prefix = "When idle: "
+		case models.ConditionTypeAfterCooldown:
+			prefix = "After cooldown: "
+		case models.ConditionTypeAfterPrevious:
+			prefix = "After previous: "
+		case models.ConditionTypeCustomExpression:
+			expr := strings.TrimSpace(payload.Expression)
+			if expr != "" {
+				prefix = fmt.Sprintf("When %s: ", expr)
+			}
+		}
+		return prefix + payload.Message
+	default:
+		return "unknown queue item"
+	}
 }
 
 func (m model) paletteLines() []string {
