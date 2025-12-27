@@ -7,11 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
+	"github.com/opencode-ai/swarm/internal/agent"
 	"github.com/opencode-ai/swarm/internal/db"
 	"github.com/opencode-ai/swarm/internal/models"
 	"github.com/opencode-ai/swarm/internal/node"
 	"github.com/opencode-ai/swarm/internal/queue"
+	"github.com/opencode-ai/swarm/internal/tmux"
 	"github.com/opencode-ai/swarm/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -184,98 +187,25 @@ If no agent is specified, uses the agent from current context.`,
 			return err
 		}
 
-		// Create queue item(s)
+		if sendImmediate {
+			return sendImmediateMessages(ctx, database, targetAgents, message, sendSkipIdle)
+		}
+
+		queueOpts, err := resolveQueueOptions(cmd)
+		if err != nil {
+			return err
+		}
+		if sendAfter != "" && sendAll {
+			return errors.New("--after cannot be used with --all")
+		}
+
 		results := make([]sendResult, 0, len(targetAgents))
-
 		for _, agent := range targetAgents {
-			var item *models.QueueItem
-
-			if sendWhenIdle {
-				// Create conditional item
-				payload := models.ConditionalPayload{
-					ConditionType: models.ConditionTypeWhenIdle,
-					Message:       message,
-				}
-				payloadBytes, _ := json.Marshal(payload)
-				item = &models.QueueItem{
-					AgentID: agent.ID,
-					Type:    models.QueueItemTypeConditional,
-					Status:  models.QueueItemStatusPending,
-					Payload: payloadBytes,
-				}
-			} else {
-				// Create regular message item
-				payload := models.MessagePayload{Text: message}
-				payloadBytes, _ := json.Marshal(payload)
-				item = &models.QueueItem{
-					AgentID: agent.ID,
-					Type:    models.QueueItemTypeMessage,
-					Status:  models.QueueItemStatusPending,
-					Payload: payloadBytes,
-				}
-			}
-
-			// Enqueue the item
-			if sendFront {
-				err = queueService.InsertAt(ctx, agent.ID, 0, item)
-			} else {
-				err = queueService.Enqueue(ctx, agent.ID, item)
-			}
-
-			if err != nil {
-				results = append(results, sendResult{
-					AgentID: agent.ID,
-					Error:   err.Error(),
-				})
-				continue
-			}
-
-			// Get queue position
-			queueItems, _ := queueService.List(ctx, agent.ID)
-			position := len(queueItems)
-			for i, qi := range queueItems {
-				if qi.ID == item.ID {
-					position = i + 1
-					break
-				}
-			}
-
-			results = append(results, sendResult{
-				AgentID:  agent.ID,
-				ItemID:   item.ID,
-				Position: position,
-				ItemType: string(item.Type),
-			})
+			results = append(results, enqueueMessage(ctx, queueService, queueRepo, agent, message, queueOpts))
 		}
 
-		// Output results
-		if IsJSONOutput() || IsJSONLOutput() {
-			return WriteOutput(os.Stdout, map[string]any{
-				"queued":  true,
-				"results": results,
-				"message": truncateMessage(message, 100),
-			})
-		}
-
-		// Human-readable output
-		for _, r := range results {
-			if r.Error != "" {
-				fmt.Printf("✗ Failed to queue for agent %s: %s\n", shortID(r.AgentID), r.Error)
-			} else {
-				positionStr := fmt.Sprintf("#%d", r.Position)
-				if sendFront {
-					positionStr = "#1 (front)"
-				}
-				typeStr := ""
-				if r.ItemType == string(models.QueueItemTypeConditional) {
-					typeStr = " (when idle)"
-				}
-				fmt.Printf("✓ Queued for agent %s at position %s%s\n", shortID(r.AgentID), positionStr, typeStr)
-			}
-		}
-
-		if len(results) == 1 && results[0].Error == "" {
-			fmt.Printf("  \"%s\"\n", truncateMessage(message, 60))
+		if err := writeQueueResults(message, results, queueOpts); err != nil {
+			return err
 		}
 
 		// Print next steps for successful sends
@@ -302,6 +232,211 @@ type sendResult struct {
 	Position int    `json:"position,omitempty"`
 	ItemType string `json:"item_type,omitempty"`
 	Error    string `json:"error,omitempty"`
+}
+
+type queueOptions struct {
+	Front    bool
+	WhenIdle bool
+	AfterID  string
+}
+
+func resolveQueueOptions(cmd *cobra.Command) (queueOptions, error) {
+	priority, err := normalizePriority(sendPriority)
+	if err != nil {
+		return queueOptions{}, err
+	}
+
+	if sendAfter != "" && sendFront {
+		return queueOptions{}, errors.New("--after cannot be used with --front")
+	}
+
+	opts := queueOptions{
+		Front:    sendFront,
+		WhenIdle: sendWhenIdle,
+		AfterID:  sendAfter,
+	}
+
+	if !opts.Front && opts.AfterID == "" && priority == "high" {
+		opts.Front = true
+	}
+
+	if cmd.Flags().Changed("priority") && priority == "low" {
+		// Low priority maps to default enqueue behavior.
+	}
+
+	return opts, nil
+}
+
+func normalizePriority(priority string) (string, error) {
+	priority = strings.TrimSpace(strings.ToLower(priority))
+	if priority == "" {
+		return "normal", nil
+	}
+	switch priority {
+	case "high", "normal", "low":
+		return priority, nil
+	default:
+		return "", errors.New("invalid priority (use high, normal, or low)")
+	}
+}
+
+func enqueueMessage(ctx context.Context, queueService *queue.Service, queueRepo *db.QueueRepository, agent *models.Agent, message string, opts queueOptions) sendResult {
+	item, err := buildQueueItem(agent.ID, message, opts.WhenIdle)
+	if err != nil {
+		return sendResult{AgentID: agent.ID, Error: err.Error()}
+	}
+
+	switch {
+	case opts.AfterID != "":
+		afterItem, err := queueRepo.Get(ctx, opts.AfterID)
+		if err != nil {
+			return sendResult{AgentID: agent.ID, Error: fmt.Sprintf("failed to find queue item %s: %v", opts.AfterID, err)}
+		}
+		if afterItem.AgentID != agent.ID {
+			return sendResult{AgentID: agent.ID, Error: fmt.Sprintf("queue item %s does not belong to agent %s", opts.AfterID, agent.ID)}
+		}
+		err = queueService.InsertAt(ctx, agent.ID, afterItem.Position+1, item)
+		if err != nil {
+			return sendResult{AgentID: agent.ID, Error: err.Error()}
+		}
+	case opts.Front:
+		if err := queueService.InsertAt(ctx, agent.ID, 0, item); err != nil {
+			return sendResult{AgentID: agent.ID, Error: err.Error()}
+		}
+	default:
+		if err := queueService.Enqueue(ctx, agent.ID, item); err != nil {
+			return sendResult{AgentID: agent.ID, Error: err.Error()}
+		}
+	}
+
+	position := 0
+	queueItems, _ := queueService.List(ctx, agent.ID)
+	for i, qi := range queueItems {
+		if qi.ID == item.ID {
+			position = i + 1
+			break
+		}
+	}
+
+	return sendResult{
+		AgentID:  agent.ID,
+		ItemID:   item.ID,
+		Position: position,
+		ItemType: string(item.Type),
+	}
+}
+
+func buildQueueItem(agentID, message string, whenIdle bool) (*models.QueueItem, error) {
+	if whenIdle {
+		payload := models.ConditionalPayload{
+			ConditionType: models.ConditionTypeWhenIdle,
+			Message:       message,
+		}
+		payloadBytes, _ := json.Marshal(payload)
+		return &models.QueueItem{
+			AgentID: agentID,
+			Type:    models.QueueItemTypeConditional,
+			Status:  models.QueueItemStatusPending,
+			Payload: payloadBytes,
+		}, nil
+	}
+
+	payload := models.MessagePayload{Text: message}
+	payloadBytes, _ := json.Marshal(payload)
+	return &models.QueueItem{
+		AgentID: agentID,
+		Type:    models.QueueItemTypeMessage,
+		Status:  models.QueueItemStatusPending,
+		Payload: payloadBytes,
+	}, nil
+}
+
+func writeQueueResults(message string, results []sendResult, opts queueOptions) error {
+	if IsJSONOutput() || IsJSONLOutput() {
+		return WriteOutput(os.Stdout, map[string]any{
+			"queued":  true,
+			"results": results,
+			"message": truncateMessage(message, 100),
+		})
+	}
+
+	for _, r := range results {
+		if r.Error != "" {
+			fmt.Printf("✗ Failed to queue for agent %s: %s\n", shortID(r.AgentID), r.Error)
+			continue
+		}
+
+		positionStr := fmt.Sprintf("#%d", r.Position)
+		if opts.AfterID != "" && r.Position > 0 {
+			positionStr = fmt.Sprintf("#%d (after %s)", r.Position, shortID(opts.AfterID))
+		} else if opts.Front {
+			positionStr = "#1 (front)"
+		}
+		typeStr := ""
+		if r.ItemType == string(models.QueueItemTypeConditional) {
+			typeStr = " (when idle)"
+		}
+		fmt.Printf("✓ Queued for agent %s at position %s%s\n", shortID(r.AgentID), positionStr, typeStr)
+	}
+
+	if len(results) == 1 && results[0].Error == "" {
+		fmt.Printf("  \"%s\"\n", truncateMessage(message, 60))
+	}
+
+	return nil
+}
+
+func sendImmediateMessages(ctx context.Context, database *db.DB, agents []*models.Agent, message string, skipIdle bool) error {
+	nodeRepo := db.NewNodeRepository(database)
+	nodeService := node.NewService(nodeRepo)
+	wsRepo := db.NewWorkspaceRepository(database)
+	agentRepo := db.NewAgentRepository(database)
+	queueRepo := db.NewQueueRepository(database)
+	wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
+
+	tmuxClient := tmux.NewLocalClient()
+	agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient, agentServiceOptions(database)...)
+
+	results := make([]sendResult, 0, len(agents))
+	for _, agentInfo := range agents {
+		opts := &agent.SendMessageOptions{SkipIdleCheck: skipIdle}
+		if err := agentService.SendMessage(ctx, agentInfo.ID, message, opts); err != nil {
+			if errors.Is(err, agent.ErrServiceAgentNotFound) {
+				results = append(results, sendResult{AgentID: agentInfo.ID, Error: "agent not found"})
+				continue
+			}
+			if errors.Is(err, agent.ErrAgentNotIdle) {
+				results = append(results, sendResult{AgentID: agentInfo.ID, Error: "agent is not idle (use --skip-idle-check to force)"})
+				continue
+			}
+			results = append(results, sendResult{AgentID: agentInfo.ID, Error: err.Error()})
+			continue
+		}
+		results = append(results, sendResult{AgentID: agentInfo.ID})
+	}
+
+	if IsJSONOutput() || IsJSONLOutput() {
+		return WriteOutput(os.Stdout, map[string]any{
+			"sent":      true,
+			"immediate": true,
+			"results":   results,
+			"message":   truncateMessage(message, 100),
+		})
+	}
+
+	for _, r := range results {
+		if r.Error != "" {
+			fmt.Printf("✗ Failed to send to agent %s: %s\n", shortID(r.AgentID), r.Error)
+			continue
+		}
+		fmt.Printf("✓ Message sent to agent %s\n", shortID(r.AgentID))
+	}
+
+	if len(results) == 1 && results[0].Error == "" {
+		fmt.Printf("  \"%s\"\n", truncateMessage(message, 60))
+	}
+
+	return nil
 }
 
 func truncateMessage(msg string, maxLen int) string {

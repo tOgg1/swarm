@@ -95,6 +95,7 @@ func init() {
 	agentSendCmd.Flags().StringVarP(&agentSendFile, "file", "f", "", "read message from file")
 	agentSendCmd.Flags().BoolVar(&agentSendStdin, "stdin", false, "read message from stdin")
 	agentSendCmd.Flags().BoolVar(&agentSendEditor, "editor", false, "compose message in $EDITOR")
+	_ = agentSendCmd.Flags().MarkDeprecated("skip-idle-check", "this command now queues messages; use 'swarm inject --force' for immediate dispatch")
 
 	// Queue flags
 	agentQueueCmd.Flags().StringVarP(&agentQueueFile, "file", "f", "", "file containing prompts (one per line)")
@@ -660,21 +661,18 @@ var agentResumeCmd = &cobra.Command{
 
 var agentSendCmd = &cobra.Command{
 	Use:        "send <agent-id> [message]",
-	Short:      "Send a message to an agent (DEPRECATED: use 'swarm send' instead)",
-	Deprecated: "Use 'swarm send' for queue-based dispatch. This command uses direct injection.",
-	Long: `DEPRECATED: Use 'swarm send' for safe queue-based dispatch.
+	Short:      "Queue a message for an agent (DEPRECATED: use 'swarm send')",
+	Deprecated: "Use 'swarm send' for queue-based dispatch. This command is an alias.",
+	Long: `DEPRECATED: Use 'swarm send' for queue-based dispatch.
 
-This command directly injects text via tmux send-keys, bypassing the queue.
-For reliable delivery, use 'swarm send' which queues messages for dispatch
-when the agent is ready.
-
-Send a text message to an agent. By default, requires the agent to be idle.
+This command now queues messages instead of immediate injection.
+For immediate dispatch, use 'swarm send --immediate' or 'swarm inject'.
 
 Provide the message inline, or use --file, --stdin, or --editor to send multi-line input.`,
-	Example: `  # RECOMMENDED: Use 'swarm send' instead
+	Example: `  # Recommended: use 'swarm send' directly
   swarm send abc123 "Fix the lint errors"
 
-  # Legacy direct injection (bypasses queue)
+  # Legacy alias (now queued)
   swarm agent send abc123 "Fix the lint errors"
 
   # Send a multi-line message from a file
@@ -689,50 +687,39 @@ Provide the message inline, or use --file, --stdin, or --editor to send multi-li
 			return err
 		}
 
+		if agentSendSkipIdle && !IsJSONOutput() && !IsJSONLOutput() {
+			fmt.Fprintln(os.Stderr, "Warning: --skip-idle-check is ignored; 'swarm agent send' now queues messages.")
+		}
+
 		database, err := openDatabase()
 		if err != nil {
 			return err
 		}
 		defer database.Close()
 
-		nodeRepo := db.NewNodeRepository(database)
-		nodeService := node.NewService(nodeRepo)
-		wsRepo := db.NewWorkspaceRepository(database)
 		agentRepo := db.NewAgentRepository(database)
 		queueRepo := db.NewQueueRepository(database)
-		wsService := workspace.NewService(wsRepo, nodeService, agentRepo)
-
-		tmuxClient := tmux.NewLocalClient()
-		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient, agentServiceOptions(database)...)
-
-		opts := &agent.SendMessageOptions{
-			SkipIdleCheck: agentSendSkipIdle,
-		}
+		queueService := queue.NewService(queueRepo)
 
 		resolved, err := findAgent(ctx, agentRepo, agentID)
 		if err != nil {
 			return err
 		}
 
-		if err := agentService.SendMessage(ctx, resolved.ID, message, opts); err != nil {
-			if errors.Is(err, agent.ErrServiceAgentNotFound) {
-				return fmt.Errorf("agent '%s' not found", resolved.ID)
-			}
-			if errors.Is(err, agent.ErrAgentNotIdle) {
-				return fmt.Errorf("agent is not idle (use --skip-idle-check to force)")
-			}
-			return fmt.Errorf("failed to send message: %w", err)
+		result := enqueueMessage(ctx, queueService, queueRepo, resolved, message, queueOptions{})
+		results := []sendResult{result}
+
+		if err := writeQueueResults(message, results, queueOptions{}); err != nil {
+			return err
 		}
 
-		if IsJSONOutput() || IsJSONLOutput() {
-			return WriteOutput(os.Stdout, map[string]any{
-				"sent":     true,
-				"agent_id": resolved.ID,
-				"message":  message,
+		if result.Error == "" {
+			PrintNextSteps(HintContext{
+				Action:   "send",
+				AgentIDs: []string{resolved.ID},
 			})
 		}
 
-		fmt.Printf("Message sent to agent '%s'\n", resolved.ID)
 		return nil
 	},
 }

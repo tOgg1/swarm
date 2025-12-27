@@ -135,8 +135,26 @@ swarm agent terminate <agent-id>
 ```
 
 Notes:
-- `agent send` preserves newlines when using `--file`, `--stdin`, or `--editor`.
-- `agent send --skip-idle-check` bypasses the idle requirement.
+- `agent send` is deprecated and now queues messages (alias for `swarm send`).
+- Use `swarm send --immediate` or `swarm inject` for immediate dispatch.
+
+### `swarm send`
+
+Queue messages for agents (safe, queue-first).
+
+```bash
+swarm send <agent-id> "message"
+swarm send "message"                     # Uses agent context
+swarm send --all "message"               # Sends to all agents in workspace
+swarm send --priority high <agent-id> "message"
+swarm send --front <agent-id> "message"
+swarm send --after <queue-item-id> <agent-id> "message"
+swarm send --when-idle <agent-id> "message"
+swarm send --immediate <agent-id> "message"   # Deprecated; bypasses queue
+```
+
+Notes:
+- `--immediate` is deprecated; prefer `swarm inject` when you need direct tmux injection.
 
 ### `swarm queue`
 
