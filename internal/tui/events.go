@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"context"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -88,4 +89,21 @@ type ConnectionStatusMsg struct {
 type ReconnectionAttemptMsg struct {
 	Attempt     int
 	MaxAttempts int
+}
+
+// InitialAgentsMsg contains the initial list of agents loaded on startup.
+type InitialAgentsMsg struct {
+	Agents []*models.Agent
+	Err    error
+}
+
+// LoadInitialAgents returns a tea.Cmd that loads all agents from the state engine.
+func LoadInitialAgents(engine *state.Engine) tea.Cmd {
+	return func() tea.Msg {
+		if engine == nil {
+			return InitialAgentsMsg{Agents: nil, Err: nil}
+		}
+		agents, err := engine.ListAgents(context.Background())
+		return InitialAgentsMsg{Agents: agents, Err: err}
+	}
 }

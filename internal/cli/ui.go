@@ -7,6 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opencode-ai/swarm/internal/adapters"
+	"github.com/opencode-ai/swarm/internal/db"
+	"github.com/opencode-ai/swarm/internal/state"
+	"github.com/opencode-ai/swarm/internal/tmux"
 	"github.com/opencode-ai/swarm/internal/tui"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -34,8 +38,26 @@ func runTUI() error {
 		}
 	}
 
+	// Open database for state engine
+	database, err := openDatabase()
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+
+	// Create state engine dependencies
+	agentRepo := db.NewAgentRepository(database)
+	eventRepo := db.NewEventRepository(database)
+	tmuxClient := tmux.NewClient(nil) // local tmux
+	registry := adapters.NewRegistry()
+
+	// Create and start state engine
+	stateEngine := state.NewEngine(agentRepo, eventRepo, tmuxClient, registry)
+
 	// Build TUI config from app config
-	tuiConfig := tui.Config{}
+	tuiConfig := tui.Config{
+		StateEngine: stateEngine,
+	}
 	if cfg := GetConfig(); cfg != nil {
 		tuiConfig.Theme = cfg.TUI.Theme
 	}

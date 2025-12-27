@@ -56,11 +56,19 @@ func RunWithConfig(cfg Config) error {
 
 	program := tea.NewProgram(m, tea.WithAltScreen())
 
-	// If we have a state engine, set up subscription after program starts
+	// If we have a state engine, set up subscription and load initial agents
 	if cfg.StateEngine != nil {
 		go func() {
 			// Small delay to let the program initialize
 			time.Sleep(50 * time.Millisecond)
+
+			// Load initial agents
+			initialCmd := LoadInitialAgents(cfg.StateEngine)
+			if initialCmd != nil {
+				program.Send(initialCmd())
+			}
+
+			// Subscribe to state changes
 			cmd := SubscribeToStateChanges(cfg.StateEngine, tuiSubscriberID)(program)
 			if cmd != nil {
 				program.Send(cmd())
@@ -249,16 +257,7 @@ const (
 func initialModel() model {
 	now := time.Now()
 	grid := components.NewWorkspaceGrid()
-	grid.SetWorkspaces(sampleWorkspaces())
 	tv := components.NewTranscriptViewer()
-	lines, timestamps := sampleTranscriptLines()
-	tv.SetLinesWithTimestamps(lines, timestamps)
-	tv.ScrollToBottom()
-	queueEditors := sampleQueueEditors()
-	approvals := sampleApprovals()
-	auditItems := sampleAuditItems()
-	mailThreads := sampleMailboxThreads()
-	beadsCache := sampleBeadsSnapshots()
 	return model{
 		styles:                styles.DefaultStyles(),
 		view:                  viewDashboard,
@@ -274,21 +273,21 @@ func initialModel() model {
 		agentWorkspaces:       make(map[string]string),
 		agentProfileOverrides: make(map[string]string),
 		stateChanges:          make([]StateChangeMsg, 0),
-		nodes:                 sampleNodes(),
-		nodesPreview:          true,
+		nodes:                 nil, // empty until loaded
+		nodesPreview:          false,
 		workspaceGrid:         grid,
-		workspacesPreview:     true,
-		beadsCache:            beadsCache,
-		queueEditors:          queueEditors,
-		approvalsByWorkspace:  approvals,
+		workspacesPreview:     false,
+		beadsCache:            make(map[string]beadsSnapshot),
+		queueEditors:          make(map[string]*queueEditorState),
+		approvalsByWorkspace:  make(map[string][]approvalItem),
 		approvalsMarked:       make(map[string]map[string]bool),
-		auditItems:            auditItems,
+		auditItems:            nil, // empty until loaded
 		auditSelected:         0,
-		mailThreads:           mailThreads,
+		mailThreads:           nil, // empty until loaded
 		mailSelected:          0,
 		mailRead:              make(map[string]bool),
 		transcriptViewer:      tv,
-		transcriptPreview:     true,
+		transcriptPreview:     false,
 		transcriptAutoScroll:  true,
 	}
 }
@@ -620,6 +619,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+	case InitialAgentsMsg:
+		// Load initial agents on startup - disable preview/demo mode
+		if msg.Err == nil {
+			// Disable demo/preview modes since we have real data connection
+			m.nodesPreview = false
+			m.workspacesPreview = false
+			m.transcriptPreview = false
+
+			for _, agent := range msg.Agents {
+				m.agentStates[agent.ID] = agent.State
+				m.agentInfo[agent.ID] = agent.StateInfo
+				if agent.LastActivity != nil {
+					m.agentLast[agent.ID] = *agent.LastActivity
+				}
+				m.agentWorkspaces[agent.ID] = agent.WorkspaceID
+			}
+			m.lastUpdated = time.Now()
+			m.stale = false
+			m.syncAgentSelection()
+		}
 	case StateChangeMsg:
 		// Update agent state tracking
 		m.agentStates[msg.AgentID] = msg.CurrentState
@@ -877,9 +896,6 @@ func (m *model) viewLines() []string {
 		if m.showTranscript && m.transcriptViewer != nil {
 			// Show transcript view instead of agent cards
 			lines = append(lines, "")
-			if m.transcriptPreview {
-				lines = append(lines, m.styles.Warning.Render("Demo transcript (sample)"))
-			}
 			_, inspectorWidth, _, _ := m.inspectorLayout()
 			m.transcriptViewer.Width = m.width - inspectorWidth - 4
 			m.transcriptViewer.Height = m.height - 10
@@ -899,11 +915,7 @@ func (m *model) viewLines() []string {
 			}
 			return m.renderWithInspector(lines, "Agent inspector", m.agentInspectorLines())
 		}
-		if len(m.agentStates) == 0 {
-			lines = append(lines, m.styles.Muted.Render("Sample data (no agents tracked yet)."))
-		} else {
-			lines = append(lines, m.styles.Text.Render(fmt.Sprintf("Tracking %d agent(s):", len(m.agentStates))))
-		}
+		lines = append(lines, m.styles.Text.Render(fmt.Sprintf("Tracking %d agent(s):", len(m.agentStates))))
 		selectedIndex := m.selectedAgentIndexFor(cards)
 		for i, card := range cards {
 			lines = append(lines, components.RenderAgentCard(m.styles, card, i == selectedIndex))
@@ -2650,11 +2662,7 @@ func (m model) renderNodesPanel(width int) string {
 		}
 	}
 
-	title := "Nodes"
-	if m.nodesPreview {
-		title = "Nodes (preview)"
-	}
-	return m.renderPanel(title, width, lines)
+	return m.renderPanel("Nodes", width, lines)
 }
 
 func (m model) renderActivityPanel(width int) string {
@@ -2868,10 +2876,8 @@ func (m model) modeLine() string {
 }
 
 func (m model) demoDataActive() bool {
-	if m.nodesPreview || m.workspacesPreview || m.transcriptPreview {
-		return true
-	}
-	return len(m.agentStates) == 0
+	// Demo mode is disabled by default - we always show real (possibly empty) data
+	return false
 }
 
 func (m model) demoBadgeLine() string {
