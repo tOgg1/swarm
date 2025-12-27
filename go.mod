@@ -5,6 +5,7 @@ go 1.25.5
 require (
 	github.com/charmbracelet/bubbletea v0.27.0
 	github.com/charmbracelet/lipgloss v0.10.0
+	github.com/creack/pty v1.1.21
 	github.com/google/uuid v1.6.0
 	github.com/rs/zerolog v1.34.0
 	github.com/spf13/cobra v1.10.2

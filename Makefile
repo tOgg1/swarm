@@ -18,11 +18,13 @@ GOMOD := $(GOCMD) mod
 # Binary names
 BINARY_CLI := swarm
 BINARY_DAEMON := swarmd
+BINARY_RUNNER := swarm-agent-runner
 
 # Directories
 BUILD_DIR := ./build
 CMD_CLI := ./cmd/swarm
 CMD_DAEMON := ./cmd/swarmd
+CMD_RUNNER := ./cmd/swarm-agent-runner
 
 # Installation directories
 PREFIX ?= /usr/local
@@ -32,7 +34,7 @@ GOBIN ?= $(shell go env GOPATH)/bin
 # Platforms for cross-compilation
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: all build build-cli build-daemon clean test lint fmt vet tidy install install-local install-system uninstall dev help proto proto-lint
+.PHONY: all build build-cli build-daemon build-runner clean test lint fmt vet tidy install install-local install-system uninstall dev help proto proto-lint
 
 # Default target
 all: build
@@ -40,7 +42,7 @@ all: build
 ## Build targets
 
 # Build both binaries
-build: build-cli build-daemon
+build: build-cli build-daemon build-runner
 
 # Build the CLI/TUI binary
 build-cli:
@@ -54,6 +56,12 @@ build-daemon:
 	@mkdir -p $(BUILD_DIR)
 	$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_DAEMON) $(CMD_DAEMON)
 
+# Build the agent runner binary
+build-runner:
+	@echo "Building $(BINARY_RUNNER)..."
+	@mkdir -p $(BUILD_DIR)
+	$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_RUNNER) $(CMD_RUNNER)
+
 # Build for all platforms
 build-all:
 	@for platform in $(PLATFORMS); do \
@@ -61,6 +69,8 @@ build-all:
 		$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_CLI)-$${platform%/*}-$${platform#*/} $(CMD_CLI); \
 		GOOS=$${platform%/*} GOARCH=$${platform#*/} \
 		$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_DAEMON)-$${platform%/*}-$${platform#*/} $(CMD_DAEMON); \
+		GOOS=$${platform%/*} GOARCH=$${platform#*/} \
+		$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_RUNNER)-$${platform%/*}-$${platform#*/} $(CMD_RUNNER); \
 	done
 
 ## Development targets
@@ -77,7 +87,8 @@ install: build
 	@mkdir -p $(GOBIN)
 	@cp $(BUILD_DIR)/$(BINARY_CLI) $(GOBIN)/$(BINARY_CLI)
 	@cp $(BUILD_DIR)/$(BINARY_DAEMON) $(GOBIN)/$(BINARY_DAEMON)
-	@echo "Installed $(BINARY_CLI) and $(BINARY_DAEMON) to $(GOBIN)"
+	@cp $(BUILD_DIR)/$(BINARY_RUNNER) $(GOBIN)/$(BINARY_RUNNER)
+	@echo "Installed $(BINARY_CLI), $(BINARY_DAEMON), and $(BINARY_RUNNER) to $(GOBIN)"
 	@echo ""
 	@echo "Make sure $(GOBIN) is in your PATH:"
 	@echo "  export PATH=\"\$$PATH:$(GOBIN)\""
@@ -91,21 +102,24 @@ install-system: build
 	@mkdir -p $(BINDIR)
 	@install -m 755 $(BUILD_DIR)/$(BINARY_CLI) $(BINDIR)/$(BINARY_CLI)
 	@install -m 755 $(BUILD_DIR)/$(BINARY_DAEMON) $(BINDIR)/$(BINARY_DAEMON)
-	@echo "Installed $(BINARY_CLI) and $(BINARY_DAEMON) to $(BINDIR)"
+	@install -m 755 $(BUILD_DIR)/$(BINARY_RUNNER) $(BINDIR)/$(BINARY_RUNNER)
+	@echo "Installed $(BINARY_CLI), $(BINARY_DAEMON), and $(BINARY_RUNNER) to $(BINDIR)"
 
 # Uninstall from GOPATH/bin
 uninstall:
 	@echo "Removing from $(GOBIN)..."
 	@rm -f $(GOBIN)/$(BINARY_CLI)
 	@rm -f $(GOBIN)/$(BINARY_DAEMON)
-	@echo "Removed $(BINARY_CLI) and $(BINARY_DAEMON) from $(GOBIN)"
+	@rm -f $(GOBIN)/$(BINARY_RUNNER)
+	@echo "Removed $(BINARY_CLI), $(BINARY_DAEMON), and $(BINARY_RUNNER) from $(GOBIN)"
 
 # Uninstall from system
 uninstall-system:
 	@echo "Removing from $(BINDIR) (may require sudo)..."
 	@rm -f $(BINDIR)/$(BINARY_CLI)
 	@rm -f $(BINDIR)/$(BINARY_DAEMON)
-	@echo "Removed $(BINARY_CLI) and $(BINARY_DAEMON) from $(BINDIR)"
+	@rm -f $(BINDIR)/$(BINARY_RUNNER)
+	@echo "Removed $(BINARY_CLI), $(BINARY_DAEMON), and $(BINARY_RUNNER) from $(BINDIR)"
 
 # Install using go install (builds and installs in one step)
 go-install:
@@ -113,6 +127,8 @@ go-install:
 	$(GOCMD) install $(LDFLAGS) $(CMD_CLI)
 	@echo "Installing $(BINARY_DAEMON) via go install..."
 	$(GOCMD) install $(LDFLAGS) $(CMD_DAEMON)
+	@echo "Installing $(BINARY_RUNNER) via go install..."
+	$(GOCMD) install $(LDFLAGS) $(CMD_RUNNER)
 	@echo "Installed to $(GOBIN)"
 
 ## Test targets
