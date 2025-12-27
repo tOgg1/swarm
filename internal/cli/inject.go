@@ -16,41 +16,58 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var injectForce bool
+var (
+	injectForce  bool
+	injectFile   string
+	injectStdin  bool
+	injectEditor bool
+)
 
 func init() {
 	rootCmd.AddCommand(injectCmd)
 
-	injectCmd.Flags().BoolVar(&injectForce, "force", false, "skip confirmation for non-idle agents")
-	injectCmd.Flags().StringVarP(&agentSendFile, "file", "f", "", "read message from file")
-	injectCmd.Flags().BoolVar(&agentSendStdin, "stdin", false, "read message from stdin")
-	injectCmd.Flags().BoolVar(&agentSendEditor, "editor", false, "compose message in $EDITOR")
+	injectCmd.Flags().BoolVarP(&injectForce, "force", "F", false, "skip confirmation for non-idle agents")
+	injectCmd.Flags().StringVarP(&injectFile, "file", "f", "", "read message from file")
+	injectCmd.Flags().BoolVar(&injectStdin, "stdin", false, "read message from stdin")
+	injectCmd.Flags().BoolVar(&injectEditor, "editor", false, "compose message in $EDITOR")
 }
 
 var injectCmd = &cobra.Command{
 	Use:   "inject <agent-id> [message]",
-	Short: "Inject a message directly into an agent (dangerous)",
-	Long: `Inject a message directly into an agent's tmux pane, bypassing the queue.
+	Short: "Inject a message directly into an agent (bypasses queue)",
+	Long: `Inject text directly into an agent's tmux pane via send-keys.
 
-This is a dangerous operation intended for emergencies or debugging.
-Use 'swarm send' for safe, queued dispatch.`,
-	Example: `  # Direct injection of a one-line message
-  swarm inject abc123 "Fix the lint errors"
+WARNING: This bypasses the scheduler queue and sends immediately.
+Use 'swarm send' for safe, queue-based message dispatch.
 
-  # Send a multi-line message from a file
+Direct injection is useful for:
+- Emergency interventions
+- Debugging agent behavior  
+- Immediate control commands
+
+But it can cause issues if the agent is not ready to receive input.
+Non-idle agents require confirmation (use --force to skip).`,
+	Example: `  # Inject a message (will prompt for confirmation if agent is busy)
+  swarm inject abc123 "Stop and commit"
+
+  # Force inject without confirmation
+  swarm inject --force abc123 "Emergency stop"
+
+  # Inject from file
   swarm inject abc123 --file prompt.txt
 
-  # Send from stdin
-  cat prompt.txt | swarm inject abc123 --stdin
+  # Inject from stdin
+  echo "Continue" | swarm inject abc123 --stdin
 
-  # Compose in $EDITOR
+  # Compose in editor
   swarm inject abc123 --editor`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
 		agentID := args[0]
 
-		message, err := resolveSendMessage(args)
+		// Resolve message - use inject-specific flags
+		message, err := resolveMessage(args[1:], injectFile, injectStdin, injectEditor)
 		if err != nil {
 			return err
 		}
@@ -76,13 +93,13 @@ Use 'swarm send' for safe, queued dispatch.`,
 			return err
 		}
 
-		if !injectForce && resolved.State != models.AgentStateIdle {
+		// Check agent state and potentially require confirmation
+		if !injectForce && !isAgentReadyForInject(resolved) {
 			if SkipConfirmation() {
 				return fmt.Errorf("agent is %s; use --force to inject without confirmation", resolved.State)
 			}
-			prompt := fmt.Sprintf("Agent '%s' is %s. Inject anyway?", resolved.ID, resolved.State)
-			if !confirm(prompt) {
-				fmt.Fprintln(os.Stderr, "Cancelled.")
+			if !confirmInject(resolved) {
+				fmt.Fprintln(os.Stderr, "Injection cancelled.")
 				return nil
 			}
 		}
@@ -98,16 +115,54 @@ Use 'swarm send' for safe, queued dispatch.`,
 
 		if IsJSONOutput() || IsJSONLOutput() {
 			return WriteOutput(os.Stdout, map[string]any{
-				"sent":           true,
+				"injected":       true,
 				"agent_id":       resolved.ID,
 				"message":        message,
 				"bypassed_queue": true,
+				"agent_state":    string(resolved.State),
 			})
 		}
 
-		fmt.Fprintln(os.Stderr, "Warning: Direct injection bypasses queue. Use `swarm send` for safe dispatch.")
-		fmt.Printf("Warning: Direct injection to agent %s\n", resolved.ID)
-		fmt.Println("Message sent (bypassed queue)")
+		fmt.Printf("Warning: Direct injection to agent %s (bypassed queue)\n", shortID(resolved.ID))
+		fmt.Println("Message injected")
 		return nil
 	},
+}
+
+// isAgentReadyForInject returns true if the agent is in a state that can safely receive input.
+func isAgentReadyForInject(a *models.Agent) bool {
+	switch a.State {
+	case models.AgentStateIdle, models.AgentStateStopped, models.AgentStateStarting:
+		return true
+	default:
+		return false
+	}
+}
+
+// confirmInject prompts the user to confirm injection to a non-ready agent.
+func confirmInject(a *models.Agent) bool {
+	stateStr := formatAgentState(a.State)
+	fmt.Printf("\nAgent %s is %s\n", shortID(a.ID), stateStr)
+
+	// Give state-specific advice
+	switch a.State {
+	case models.AgentStateWorking:
+		fmt.Println("  The agent is currently working on a task.")
+		fmt.Println("  Injecting now may corrupt or confuse the agent's context.")
+	case models.AgentStateAwaitingApproval:
+		fmt.Println("  The agent is waiting for approval.")
+		fmt.Println("  Consider using 'swarm agent approve' instead.")
+	case models.AgentStatePaused:
+		fmt.Println("  The agent is paused.")
+		fmt.Println("  Consider using 'swarm agent resume' first.")
+	case models.AgentStateRateLimited:
+		fmt.Println("  The agent is rate-limited.")
+		fmt.Println("  The message may not be processed immediately.")
+	case models.AgentStateError:
+		fmt.Println("  The agent is in an error state.")
+		fmt.Println("  Consider using 'swarm agent restart' first.")
+	}
+
+	fmt.Println()
+	return confirm("Proceed with injection?")
 }
