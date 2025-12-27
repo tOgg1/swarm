@@ -38,15 +38,16 @@ const (
 type BlockReason string
 
 const (
-	BlockReasonNone            BlockReason = ""
-	BlockReasonNotIdle         BlockReason = "agent_not_idle"
-	BlockReasonPaused          BlockReason = "agent_paused"
-	BlockReasonStopped         BlockReason = "agent_stopped"
-	BlockReasonSchedulerPaused BlockReason = "scheduler_paused"
-	BlockReasonRetryBackoff    BlockReason = "retry_backoff"
-	BlockReasonAccountCooldown BlockReason = "account_cooldown"
-	BlockReasonQueueEmpty      BlockReason = "queue_empty"
-	BlockReasonConditionNotMet BlockReason = "condition_not_met"
+	BlockReasonNone             BlockReason = ""
+	BlockReasonNotIdle          BlockReason = "agent_not_idle"
+	BlockReasonPaused           BlockReason = "agent_paused"
+	BlockReasonStopped          BlockReason = "agent_stopped"
+	BlockReasonSchedulerPaused  BlockReason = "scheduler_paused"
+	BlockReasonRetryBackoff     BlockReason = "retry_backoff"
+	BlockReasonAccountCooldown  BlockReason = "account_cooldown"
+	BlockReasonQueueEmpty       BlockReason = "queue_empty"
+	BlockReasonConditionNotMet  BlockReason = "condition_not_met"
+	BlockReasonAwaitingApproval BlockReason = "awaiting_approval"
 )
 
 // AgentSnapshot represents the state of an agent at a point in time.
@@ -192,15 +193,16 @@ func Tick(input TickInput) TickResult {
 			}
 		}
 
-		// Check eligibility
-		blocked, reason := checkEligibility(agent, accountMap, input.Now, config)
+		// Check if there's a queue item first (needed for permission response check)
+		item, hasItem := queueMap[agent.ID]
+
+		// Check eligibility (passing item for AwaitingApproval special case)
+		blocked, reason := checkEligibilityWithItem(agent, accountMap, input.Now, config, hasItem, item)
 		if blocked {
 			result.Blocked[agent.ID] = reason
 			continue
 		}
 
-		// Check if there's a queue item
-		item, hasItem := queueMap[agent.ID]
 		if !hasItem {
 			result.Blocked[agent.ID] = BlockReasonQueueEmpty
 			continue
@@ -240,11 +242,25 @@ func buildQueueMap(items []QueueItemSnapshot) map[string]QueueItemSnapshot {
 }
 
 // checkEligibility determines if an agent can receive dispatches.
+// Deprecated: Use checkEligibilityWithItem for proper AwaitingApproval handling.
 func checkEligibility(
 	agent AgentSnapshot,
 	accounts map[string]AccountSnapshot,
 	now time.Time,
 	config TickConfig,
+) (blocked bool, reason BlockReason) {
+	return checkEligibilityWithItem(agent, accounts, now, config, false, QueueItemSnapshot{})
+}
+
+// checkEligibilityWithItem determines if an agent can receive dispatches,
+// considering the queue item for special cases like permission responses.
+func checkEligibilityWithItem(
+	agent AgentSnapshot,
+	accounts map[string]AccountSnapshot,
+	now time.Time,
+	config TickConfig,
+	hasItem bool,
+	item QueueItemSnapshot,
 ) (blocked bool, reason BlockReason) {
 	// Check scheduler-level pause
 	if agent.SchedulerPaused {
@@ -264,11 +280,29 @@ func checkEligibility(
 		return true, BlockReasonStopped
 	}
 
-	// Check idle requirement
+	// Special handling for AwaitingApproval state:
+	// Only allow dispatch if the message is a permission response
+	if agent.State == models.AgentStateAwaitingApproval {
+		if !hasItem {
+			return true, BlockReasonAwaitingApproval
+		}
+		if item.Type != models.QueueItemTypeMessage {
+			return true, BlockReasonAwaitingApproval
+		}
+		// Check if this is a permission response message
+		if !isPermissionResponse(item.Payload) {
+			return true, BlockReasonAwaitingApproval
+		}
+		// Permission response can be dispatched - skip idle check
+		goto checkAccountCooldown
+	}
+
+	// Check idle requirement (skip for permission responses handled above)
 	if config.IdleStateRequired && agent.State != models.AgentStateIdle {
 		return true, BlockReasonNotIdle
 	}
 
+checkAccountCooldown:
 	// Check account cooldown
 	if agent.AccountID != "" {
 		if acc, ok := accounts[agent.AccountID]; ok {
@@ -284,6 +318,15 @@ func checkEligibility(
 	}
 
 	return false, BlockReasonNone
+}
+
+// isPermissionResponse checks if a message payload is a permission response.
+func isPermissionResponse(payload json.RawMessage) bool {
+	var msg models.MessagePayload
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		return false
+	}
+	return msg.IsPermissionResponse
 }
 
 // processQueueItem determines actions for a specific queue item.

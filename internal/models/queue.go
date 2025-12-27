@@ -71,6 +71,10 @@ type QueueItem struct {
 type MessagePayload struct {
 	// Text is the message content to send.
 	Text string `json:"text"`
+
+	// IsPermissionResponse indicates this message is a response to a permission prompt.
+	// When true, this message can be dispatched to agents in AwaitingApproval state.
+	IsPermissionResponse bool `json:"is_permission_response,omitempty"`
 }
 
 // Validate checks if the message payload is valid.

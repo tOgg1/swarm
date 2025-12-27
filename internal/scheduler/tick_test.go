@@ -45,7 +45,7 @@ func TestTick_DispatchOnlyWhenIdle(t *testing.T) {
 			name:         "awaiting approval blocked",
 			agentState:   models.AgentStateAwaitingApproval,
 			wantDispatch: false,
-			wantBlocked:  BlockReasonNotIdle,
+			wantBlocked:  BlockReasonAwaitingApproval,
 		},
 	}
 
@@ -587,6 +587,99 @@ func TestTick_IdleStateNotRequired(t *testing.T) {
 
 	if !hasDispatch {
 		t.Error("expected dispatch when IdleStateRequired=false")
+	}
+}
+
+func TestTick_AwaitingApproval(t *testing.T) {
+	now := time.Now().UTC()
+
+	tests := []struct {
+		name                 string
+		isPermissionResponse bool
+		wantDispatch         bool
+		wantBlocked          BlockReason
+	}{
+		{
+			name:                 "regular message blocked when awaiting approval",
+			isPermissionResponse: false,
+			wantDispatch:         false,
+			wantBlocked:          BlockReasonAwaitingApproval,
+		},
+		{
+			name:                 "permission response allowed when awaiting approval",
+			isPermissionResponse: true,
+			wantDispatch:         true,
+			wantBlocked:          BlockReasonNone,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := TickInput{
+				Agents: []AgentSnapshot{{
+					ID:          "agent-1",
+					State:       models.AgentStateAwaitingApproval,
+					QueueLength: 1,
+				}},
+				QueueItems: []QueueItemSnapshot{{
+					ID:      "item-1",
+					AgentID: "agent-1",
+					Type:    models.QueueItemTypeMessage,
+					Status:  models.QueueItemStatusPending,
+					Payload: mustMarshal(models.MessagePayload{
+						Text:                 "y",
+						IsPermissionResponse: tt.isPermissionResponse,
+					}),
+				}},
+				Now:    now,
+				Config: DefaultTickConfig(),
+			}
+
+			result := Tick(input)
+
+			hasDispatch := false
+			for _, action := range result.Actions {
+				if action.Type == ActionTypeDispatch {
+					hasDispatch = true
+					break
+				}
+			}
+
+			if hasDispatch != tt.wantDispatch {
+				t.Errorf("dispatch = %v, want %v", hasDispatch, tt.wantDispatch)
+			}
+
+			if tt.wantBlocked != BlockReasonNone {
+				if blocked, ok := result.Blocked["agent-1"]; !ok || blocked != tt.wantBlocked {
+					t.Errorf("blocked = %v, want %v", blocked, tt.wantBlocked)
+				}
+			}
+		})
+	}
+}
+
+func TestTick_AwaitingApproval_NoItem(t *testing.T) {
+	now := time.Now().UTC()
+
+	input := TickInput{
+		Agents: []AgentSnapshot{{
+			ID:          "agent-1",
+			State:       models.AgentStateAwaitingApproval,
+			QueueLength: 0, // No items
+		}},
+		QueueItems: []QueueItemSnapshot{},
+		Now:        now,
+		Config:     DefaultTickConfig(),
+	}
+
+	result := Tick(input)
+
+	// Should be blocked with AwaitingApproval reason (no items to check)
+	if blocked, ok := result.Blocked["agent-1"]; !ok {
+		t.Error("expected agent to be blocked")
+	} else if blocked != BlockReasonAwaitingApproval && blocked != BlockReasonQueueEmpty {
+		// Either reason is acceptable - AwaitingApproval checked first, then QueueEmpty
+		t.Errorf("blocked = %v, want %v or %v", blocked, BlockReasonAwaitingApproval, BlockReasonQueueEmpty)
 	}
 }
 
