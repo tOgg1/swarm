@@ -73,16 +73,15 @@ func init() {
 	agentCmd.AddCommand(agentApproveCmd)
 
 	// Spawn flags
-	agentSpawnCmd.Flags().StringVarP(&agentSpawnWorkspace, "workspace", "w", "", "workspace name or ID (required)")
+	agentSpawnCmd.Flags().StringVarP(&agentSpawnWorkspace, "workspace", "w", "", "workspace name or ID (uses context if not set)")
 	agentSpawnCmd.Flags().StringVarP(&agentSpawnType, "type", "t", "opencode", "agent type (opencode, claude-code, codex, gemini, generic)")
 	agentSpawnCmd.Flags().IntVarP(&agentSpawnCount, "count", "n", 1, "number of agents to spawn")
 	agentSpawnCmd.Flags().StringVarP(&agentSpawnProfile, "profile", "p", "", "account profile to use")
 	agentSpawnCmd.Flags().StringVar(&agentSpawnPrompt, "prompt", "", "initial prompt to send after spawn")
 	agentSpawnCmd.Flags().BoolVar(&agentSpawnNoWait, "no-wait", false, "don't wait for agent to be ready")
-	agentSpawnCmd.MarkFlagRequired("workspace")
 
 	// List flags
-	agentListCmd.Flags().StringVarP(&agentListWorkspace, "workspace", "w", "", "filter by workspace")
+	agentListCmd.Flags().StringVarP(&agentListWorkspace, "workspace", "w", "", "filter by workspace (uses context if not set)")
 	agentListCmd.Flags().StringVar(&agentListState, "state", "", "filter by state (working, idle, paused, error, etc.)")
 
 	// Terminate flags
@@ -120,8 +119,15 @@ var agentSpawnCmd = &cobra.Command{
 	Short: "Spawn a new agent",
 	Long: `Spawn one or more AI coding agents in a workspace.
 
-The agent will be started in a new tmux pane in the workspace's session.`,
-	Example: `  # Spawn a single opencode agent
+The agent will be started in a new tmux pane in the workspace's session.
+
+If --workspace is not specified, the workspace is resolved from:
+1. Current directory (if in a workspace's git repo)
+2. Stored context (set with 'swarm use <workspace>')`,
+	Example: `  # Spawn in current workspace (from directory or context)
+  swarm agent spawn
+
+  # Spawn a single opencode agent
   swarm agent spawn --workspace my-project
 
   # Spawn 3 claude-code agents with a specific profile
@@ -149,10 +155,14 @@ The agent will be started in a new tmux pane in the workspace's session.`,
 		tmuxClient := tmux.NewLocalClient()
 		agentService := agent.NewService(agentRepo, queueRepo, wsService, nil, tmuxClient, agentServiceOptions(database)...)
 
-		// Find workspace
-		ws, err := findWorkspace(ctx, wsRepo, agentSpawnWorkspace)
+		// Resolve workspace from flag, directory, or stored context
+		resolved, err := RequireWorkspaceContext(ctx, wsRepo, agentSpawnWorkspace)
 		if err != nil {
 			return err
+		}
+		ws, err := wsRepo.Get(ctx, resolved.WorkspaceID)
+		if err != nil {
+			return fmt.Errorf("failed to get workspace: %w", err)
 		}
 
 		approvalPolicy := ""

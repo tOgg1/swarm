@@ -32,7 +32,6 @@ type PortAllocation struct {
 	AgentID     *string
 	Reason      string
 	AllocatedAt time.Time
-	ReleasedAt  *time.Time
 }
 
 // PortRepository handles port allocation persistence.
@@ -142,15 +141,12 @@ func (r *PortRepository) AllocateSpecific(ctx context.Context, nodeID string, po
 	return nil
 }
 
-// Release releases a port allocation by marking it as released.
+// Release releases a port allocation by deleting it.
 func (r *PortRepository) Release(ctx context.Context, nodeID string, port int) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-
 	result, err := r.db.ExecContext(ctx, `
-		UPDATE port_allocations 
-		SET released_at = ?
-		WHERE node_id = ? AND port = ? AND released_at IS NULL
-	`, now, nodeID, port)
+		DELETE FROM port_allocations 
+		WHERE node_id = ? AND port = ?
+	`, nodeID, port)
 	if err != nil {
 		return fmt.Errorf("failed to release port: %w", err)
 	}
@@ -169,13 +165,10 @@ func (r *PortRepository) Release(ctx context.Context, nodeID string, port int) e
 
 // ReleaseByAgent releases all ports allocated to a specific agent.
 func (r *PortRepository) ReleaseByAgent(ctx context.Context, agentID string) (int, error) {
-	now := time.Now().UTC().Format(time.RFC3339)
-
 	result, err := r.db.ExecContext(ctx, `
-		UPDATE port_allocations 
-		SET released_at = ?
-		WHERE agent_id = ? AND released_at IS NULL
-	`, now, agentID)
+		DELETE FROM port_allocations 
+		WHERE agent_id = ?
+	`, agentID)
 	if err != nil {
 		return 0, fmt.Errorf("failed to release agent ports: %w", err)
 	}
