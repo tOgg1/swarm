@@ -1,0 +1,5 @@
+name: single
+description: Single agent for quick tasks
+agents:
+  - count: 1
+    type: opencode

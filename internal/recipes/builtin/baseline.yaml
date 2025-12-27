@@ -1,0 +1,7 @@
+name: baseline
+description: Standard development setup with 2 agents
+agents:
+  - count: 2
+    type: opencode
+    profile_rotation: round-robin
+    initial_template: continue

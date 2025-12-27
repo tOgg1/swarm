@@ -1,0 +1,9 @@
+name: heavy
+description: Heavy parallel workload with 6 agents
+agents:
+  - count: 4
+    type: opencode
+    profile_rotation: round-robin
+  - count: 2
+    type: claude-code
+    profile_rotation: round-robin
