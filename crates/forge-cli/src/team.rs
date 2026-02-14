@@ -562,23 +562,26 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
     } else {
         0
     };
+    let mut index = start;
     let mut json = false;
     let mut jsonl = false;
     let mut quiet = false;
-    let mut tokens = Vec::new();
 
-    for arg in &args[start..] {
-        match arg.as_str() {
+    while index < args.len() {
+        match args[index].as_str() {
             "--json" => {
                 json = true;
+                index += 1;
             }
             "--jsonl" => {
                 jsonl = true;
+                index += 1;
             }
             "--quiet" => {
                 quiet = true;
+                index += 1;
             }
-            _ => tokens.push(arg.clone()),
+            _ => break,
         }
     }
 
@@ -586,7 +589,7 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
         return Err("--json and --jsonl are mutually exclusive".to_string());
     }
 
-    if tokens.is_empty() {
+    if index >= args.len() {
         return Ok(ParsedArgs {
             command: Command::Help,
             json,
@@ -595,13 +598,15 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
         });
     }
 
-    let command = match tokens[0].as_str() {
+    let subcommand = args[index].as_str();
+    index += 1;
+    let command = match subcommand {
         "help" | "-h" | "--help" => Command::Help,
         "ls" | "list" => Command::List,
-        "new" | "create" => parse_new_args(&tokens, 1)?,
-        "rm" | "delete" => parse_remove_args(&tokens, 1)?,
-        "show" | "get" => parse_show_args(&tokens, 1)?,
-        "member" => parse_member_args(&tokens, 1)?,
+        "new" | "create" => parse_new_args(args, index)?,
+        "rm" | "delete" => parse_remove_args(args, index)?,
+        "show" | "get" => parse_show_args(args, index)?,
+        "member" => parse_member_args(args, index)?,
         other => return Err(format!("unknown team subcommand: {other}")),
     };
 
@@ -1000,12 +1005,37 @@ mod tests {
         let created = run_for_test(&["team", "new", "ops"], &backend);
         assert_eq!(created.exit_code, 0, "stderr={}", created.stderr);
 
-        let listed = run_for_test(&["team", "ls", "--json"], &backend);
+        let listed = run_for_test(&["team", "--json", "ls"], &backend);
         assert_eq!(listed.exit_code, 0, "stderr={}", listed.stderr);
         let value: serde_json::Value = serde_json::from_str(&listed.stdout).unwrap();
         let first = &value[0];
         assert_eq!(first["name"], "ops");
         assert_eq!(first["queue"]["open"], 0);
+
+        cleanup_db(&db_path);
+    }
+
+    #[test]
+    fn new_keeps_literal_default_assignee_named_json_flag() {
+        let db_path = temp_db_path("default-assignee-json-token");
+        let backend = SqliteTeamBackend::new(db_path.clone());
+
+        let created = run_for_test(
+            &[
+                "team",
+                "--json",
+                "new",
+                "ops",
+                "--default-assignee",
+                "--json",
+            ],
+            &backend,
+        );
+        assert_eq!(created.exit_code, 0, "stderr={}", created.stderr);
+
+        let shown = run_for_test(&["team", "show", "ops"], &backend);
+        assert_eq!(shown.exit_code, 0, "stderr={}", shown.stderr);
+        assert!(shown.stdout.contains("default_assignee: --json"));
 
         cleanup_db(&db_path);
     }
