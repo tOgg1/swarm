@@ -77,15 +77,14 @@ impl NodeBackend for ShellNodeBackend {
 
     fn run_ssh(&mut self, endpoint: &str, command: &str) -> Result<ShellCommandResult, String> {
         let mut process = Command::new("ssh");
+        let remote = format!("sh -lc {}", shell_quote(command));
         process.args([
             "-o",
             "BatchMode=yes",
             "-o",
             "ConnectTimeout=10",
             endpoint,
-            "sh",
-            "-lc",
-            command,
+            &remote,
         ]);
         run_process(process, "ssh command")
     }
@@ -297,13 +296,6 @@ fn route_exec_with_stage(
             return Err("mesh master missing from registry entries".to_string());
         };
 
-        let master_endpoint = normalize_ssh_endpoint(master.endpoint.as_str()).ok_or_else(|| {
-            format!(
-                "master node {} offline: endpoint missing (set with 'forge mesh promote --endpoint')",
-                master.id
-            )
-        })?;
-
         let forwarded_cmd = format!(
             "{}={} forge node exec {} -- {}",
             ROUTE_STAGE_ENV,
@@ -311,11 +303,25 @@ fn route_exec_with_stage(
             shell_quote(node_id),
             shell_quote(command)
         );
-        let forwarded_result = backend.run_ssh(&master_endpoint, &forwarded_cmd)?;
-        if forwarded_result.exit_code == 255 {
-            let detail = trim_or_default(&forwarded_result.stderr, "ssh connection failed");
-            return Err(format!("master node {} offline: {detail}", master.id));
-        }
+        let forwarded_result = if is_local_endpoint(master.endpoint.as_str())
+            || (master.endpoint.trim().is_empty() && master.is_master)
+        {
+            backend.run_local(&forwarded_cmd)?
+        } else {
+            let master_endpoint =
+                normalize_ssh_endpoint(master.endpoint.as_str()).ok_or_else(|| {
+                    format!(
+                        "master node {} offline: endpoint missing (set with 'forge mesh promote --endpoint')",
+                        master.id
+                    )
+                })?;
+            let result = backend.run_ssh(&master_endpoint, &forwarded_cmd)?;
+            if result.exit_code == 255 {
+                let detail = trim_or_default(&result.stderr, "ssh connection failed");
+                return Err(format!("master node {} offline: {detail}", master.id));
+            }
+            result
+        };
 
         return Ok(NodeExecResult {
             node_id: node_id.to_string(),
@@ -846,6 +852,26 @@ mod tests {
             .1
             .contains("FORGE_NODE_ROUTE_STAGE=master"));
         assert!(backend.ssh_calls[0].1.contains("forge node exec"));
+    }
+
+    #[test]
+    fn route_exec_forwards_via_local_master_without_ssh() {
+        let mut status = mesh_status();
+        status.nodes[0].endpoint = "local".to_string();
+        let mut backend =
+            InMemoryNodeBackend::with_status(status).with_local_result(ShellCommandResult {
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+            });
+
+        let result = route_exec_with_backend("node-worker", "echo hi", &mut backend);
+        let result = result.unwrap_or_else(|err| panic!("route via local master: {err}"));
+        assert_eq!(result.routed_via.as_deref(), Some("node-master"));
+        assert_eq!(result.stdout, "ok");
+        assert_eq!(backend.ssh_calls.len(), 0);
+        assert_eq!(backend.local_calls.len(), 1);
+        assert!(backend.local_calls[0].contains("FORGE_NODE_ROUTE_STAGE=master"));
     }
 
     #[test]

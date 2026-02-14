@@ -563,13 +563,17 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
     index += 1;
     let command = match subcommand {
         "help" | "-h" | "--help" => Command::Help,
-        "send" => parse_send_args(args, index)?,
-        "ls" | "list" => parse_list_args(args, index)?,
-        "show" => parse_show_args(args, index)?,
-        "assign" => parse_assign_args(args, index)?,
-        "retry" => parse_retry_args(args, index)?,
+        "send" => parse_send_args(args, index, &mut json, &mut jsonl, &mut quiet)?,
+        "ls" | "list" => parse_list_args(args, index, &mut json, &mut jsonl, &mut quiet)?,
+        "show" => parse_show_args(args, index, &mut json, &mut jsonl, &mut quiet)?,
+        "assign" => parse_assign_args(args, index, &mut json, &mut jsonl, &mut quiet)?,
+        "retry" => parse_retry_args(args, index, &mut json, &mut jsonl, &mut quiet)?,
         other => return Err(format!("unknown task subcommand: {other}")),
     };
+
+    if json && jsonl {
+        return Err("--json and --jsonl are mutually exclusive".to_string());
+    }
 
     Ok(ParsedArgs {
         command,
@@ -579,7 +583,13 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
     })
 }
 
-fn parse_send_args(args: &[String], mut index: usize) -> Result<Command, String> {
+fn parse_send_args(
+    args: &[String],
+    mut index: usize,
+    json: &mut bool,
+    jsonl: &mut bool,
+    quiet: &mut bool,
+) -> Result<Command, String> {
     let mut team_reference = String::new();
     let mut payload_type = String::new();
     let mut title = String::new();
@@ -645,6 +655,18 @@ fn parse_send_args(args: &[String], mut index: usize) -> Result<Command, String>
                     .map_err(|err| format!("invalid --priority value {raw:?}: {err}"))?;
                 index += 1;
             }
+            "--json" => {
+                *json = true;
+                index += 1;
+            }
+            "--jsonl" => {
+                *jsonl = true;
+                index += 1;
+            }
+            "--quiet" => {
+                *quiet = true;
+                index += 1;
+            }
             value if value.starts_with('-') => {
                 return Err(format!("unknown flag for task send: {value}"));
             }
@@ -678,7 +700,13 @@ fn parse_send_args(args: &[String], mut index: usize) -> Result<Command, String>
     })
 }
 
-fn parse_list_args(args: &[String], mut index: usize) -> Result<Command, String> {
+fn parse_list_args(
+    args: &[String],
+    mut index: usize,
+    json: &mut bool,
+    jsonl: &mut bool,
+    quiet: &mut bool,
+) -> Result<Command, String> {
     let mut team_reference = String::new();
     let mut statuses = Vec::new();
     let mut assignee = String::new();
@@ -708,6 +736,18 @@ fn parse_list_args(args: &[String], mut index: usize) -> Result<Command, String>
                 limit = raw
                     .parse::<usize>()
                     .map_err(|err| format!("invalid --limit value {raw:?}: {err}"))?;
+                index += 1;
+            }
+            "--json" => {
+                *json = true;
+                index += 1;
+            }
+            "--jsonl" => {
+                *jsonl = true;
+                index += 1;
+            }
+            "--quiet" => {
+                *quiet = true;
                 index += 1;
             }
             value if value.starts_with('-') => {
@@ -741,13 +781,31 @@ fn parse_list_args(args: &[String], mut index: usize) -> Result<Command, String>
     })
 }
 
-fn parse_show_args(args: &[String], mut index: usize) -> Result<Command, String> {
+fn parse_show_args(
+    args: &[String],
+    mut index: usize,
+    json: &mut bool,
+    jsonl: &mut bool,
+    quiet: &mut bool,
+) -> Result<Command, String> {
     let mut task_id = String::new();
     while index < args.len() {
         match args[index].as_str() {
             "--task" | "--id" => {
                 index += 1;
                 task_id = take_value(args, index, "--task")?;
+                index += 1;
+            }
+            "--json" => {
+                *json = true;
+                index += 1;
+            }
+            "--jsonl" => {
+                *jsonl = true;
+                index += 1;
+            }
+            "--quiet" => {
+                *quiet = true;
                 index += 1;
             }
             value if value.starts_with('-') => {
@@ -770,7 +828,13 @@ fn parse_show_args(args: &[String], mut index: usize) -> Result<Command, String>
     Ok(Command::Show { task_id })
 }
 
-fn parse_assign_args(args: &[String], mut index: usize) -> Result<Command, String> {
+fn parse_assign_args(
+    args: &[String],
+    mut index: usize,
+    json: &mut bool,
+    jsonl: &mut bool,
+    quiet: &mut bool,
+) -> Result<Command, String> {
     let mut task_id = String::new();
     let mut agent_id = String::new();
     let mut actor = None;
@@ -790,6 +854,18 @@ fn parse_assign_args(args: &[String], mut index: usize) -> Result<Command, Strin
             "--actor" => {
                 index += 1;
                 actor = Some(take_value(args, index, "--actor")?);
+                index += 1;
+            }
+            "--json" => {
+                *json = true;
+                index += 1;
+            }
+            "--jsonl" => {
+                *jsonl = true;
+                index += 1;
+            }
+            "--quiet" => {
+                *quiet = true;
                 index += 1;
             }
             value if value.starts_with('-') => {
@@ -822,7 +898,13 @@ fn parse_assign_args(args: &[String], mut index: usize) -> Result<Command, Strin
     })
 }
 
-fn parse_retry_args(args: &[String], mut index: usize) -> Result<Command, String> {
+fn parse_retry_args(
+    args: &[String],
+    mut index: usize,
+    json: &mut bool,
+    jsonl: &mut bool,
+    quiet: &mut bool,
+) -> Result<Command, String> {
     let mut task_id = String::new();
     let mut actor = None;
 
@@ -836,6 +918,18 @@ fn parse_retry_args(args: &[String], mut index: usize) -> Result<Command, String
             "--actor" => {
                 index += 1;
                 actor = Some(take_value(args, index, "--actor")?);
+                index += 1;
+            }
+            "--json" => {
+                *json = true;
+                index += 1;
+            }
+            "--jsonl" => {
+                *jsonl = true;
+                index += 1;
+            }
+            "--quiet" => {
+                *quiet = true;
                 index += 1;
             }
             value if value.starts_with('-') => {
@@ -1069,7 +1163,10 @@ mod tests {
             .find(|event| event["event_type"] == "submitted")
             .unwrap();
         assert_eq!(submitted_event["actor_agent_id"], "agent-retry");
-        assert_eq!(submitted_event["detail"], format!("source_task_id={task_id}"));
+        assert_eq!(
+            submitted_event["detail"],
+            format!("source_task_id={task_id}")
+        );
 
         cleanup_db(&db_path);
     }
@@ -1082,14 +1179,7 @@ mod tests {
 
         let sent = run_for_test(
             &[
-                "task",
-                "--json",
-                "send",
-                "--team",
-                "ops",
-                "--type",
-                "incident",
-                "--title",
+                "task", "--json", "send", "--team", "ops", "--type", "incident", "--title",
                 "--json",
             ],
             &backend,

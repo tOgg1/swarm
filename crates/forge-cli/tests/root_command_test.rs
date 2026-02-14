@@ -45,15 +45,7 @@ fn root_help_omits_dropped_legacy_command_groups() {
     let out = run(&["--help"]);
     assert_eq!(out.exit_code, 0);
 
-    for command in [
-        "accounts",
-        "attach",
-        "node",
-        "recipe",
-        "vault",
-        "workspace",
-        "ws",
-    ] {
+    for command in ["accounts", "attach", "recipe", "vault", "workspace", "ws"] {
         let listed = format!("\n  {command} ");
         assert!(
             !out.stdout.contains(&listed),
@@ -94,15 +86,7 @@ fn unknown_command_text_error() {
 
 #[test]
 fn dropped_legacy_commands_are_unknown() {
-    for command in [
-        "accounts",
-        "attach",
-        "node",
-        "recipe",
-        "vault",
-        "workspace",
-        "ws",
-    ] {
+    for command in ["accounts", "attach", "recipe", "vault", "workspace", "ws"] {
         let out = run(&[command]);
         assert_eq!(
             out.exit_code, 1,
