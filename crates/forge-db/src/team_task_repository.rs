@@ -410,6 +410,50 @@ impl<'a> TeamTaskRepository<'a> {
         )
     }
 
+    pub fn retry(&self, task_id: &str, actor: Option<&str>) -> Result<(TeamTask, TeamTask), DbError> {
+        let source = self.get(task_id)?;
+        let source_status = TeamTaskStatus::parse(source.status.trim())?;
+        if !source_status.is_terminal() {
+            return Err(DbError::Validation(format!(
+                "retry requires terminal task status (done|failed|canceled), got {}",
+                source.status
+            )));
+        }
+
+        let mut retry = TeamTask {
+            id: String::new(),
+            team_id: source.team_id.clone(),
+            payload_json: source.payload_json.clone(),
+            status: TeamTaskStatus::Queued.as_str().to_owned(),
+            priority: source.priority,
+            assigned_agent_id: String::new(),
+            submitted_at: String::new(),
+            assigned_at: None,
+            started_at: None,
+            finished_at: None,
+            updated_at: String::new(),
+        };
+        self.submit(&mut retry)?;
+
+        let detail = format!("source_task_id={}", source.id);
+        self.db.conn().execute(
+            "UPDATE team_task_events
+             SET actor_agent_id = ?1,
+                 detail = ?2
+             WHERE id = (
+                SELECT id
+                FROM team_task_events
+                WHERE task_id = ?3
+                  AND event_type = 'submitted'
+                ORDER BY id DESC
+                LIMIT 1
+             )",
+            params![actor, detail, retry.id],
+        )?;
+
+        Ok((source, retry))
+    }
+
     pub fn list_events(&self, task_id: &str) -> Result<Vec<TeamTaskEvent>, DbError> {
         let mut stmt = self.db.conn().prepare(
             "SELECT id, task_id, team_id, event_type, from_status, to_status, actor_agent_id, detail, created_at
@@ -612,6 +656,10 @@ impl<'a> TeamTaskService<'a> {
         detail: Option<&str>,
     ) -> Result<TeamTask, DbError> {
         self.repo.fail(task_id, actor, detail)
+    }
+
+    pub fn retry(&self, task_id: &str, actor: Option<&str>) -> Result<(TeamTask, TeamTask), DbError> {
+        self.repo.retry(task_id, actor)
     }
 }
 

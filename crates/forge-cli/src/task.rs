@@ -446,36 +446,14 @@ fn execute_retry(
     parsed: &ParsedArgs,
     stdout: &mut dyn Write,
     task_id: &str,
-    _actor: Option<&str>,
+    actor: Option<&str>,
 ) -> Result<(), String> {
     let db = backend.open_db()?;
     let repo = TeamTaskRepository::new(&db);
 
-    let source = repo
-        .get(task_id)
-        .map_err(|err| format!("show source task: {err}"))?;
-    if !matches!(source.status.as_str(), "done" | "failed" | "canceled") {
-        return Err(format!(
-            "retry requires terminal task status (done|failed|canceled), got {}",
-            source.status
-        ));
-    }
-
-    let mut retry = TeamTask {
-        id: String::new(),
-        team_id: source.team_id.clone(),
-        payload_json: source.payload_json.clone(),
-        status: TeamTaskStatus::Queued.as_str().to_owned(),
-        priority: source.priority,
-        assigned_agent_id: String::new(),
-        submitted_at: String::new(),
-        assigned_at: None,
-        started_at: None,
-        finished_at: None,
-        updated_at: String::new(),
-    };
-    repo.submit(&mut retry)
-        .map_err(|err| format!("retry submit: {err}"))?;
+    let (source, retry) = repo
+        .retry(task_id, actor)
+        .map_err(|err| format!("retry task: {err}"))?;
 
     let output = TaskRetryOutput {
         source_task_id: source.id,
@@ -1031,6 +1009,67 @@ mod tests {
         let retry = run_for_test(&["task", "retry", &task_id], &backend);
         assert_eq!(retry.exit_code, 1);
         assert!(retry.stderr.contains("retry requires terminal task status"));
+
+        cleanup_db(&db_path);
+    }
+
+    #[test]
+    fn retry_records_actor_on_submitted_event() {
+        let db_path = temp_db_path("retry-actor");
+        seed_team(&db_path, "ops");
+        let backend = SqliteTaskBackend::new(db_path.clone());
+
+        let sent = run_for_test(
+            &[
+                "task",
+                "--json",
+                "send",
+                "--team",
+                "ops",
+                "--type",
+                "incident",
+                "--title",
+                "pipeline down",
+            ],
+            &backend,
+        );
+        assert_eq!(sent.exit_code, 0, "stderr={}", sent.stderr);
+        let task_id = serde_json::from_str::<serde_json::Value>(&sent.stdout).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        mark_failed(&db_path, &task_id);
+
+        let retried = run_for_test(
+            &[
+                "task",
+                "--json",
+                "retry",
+                &task_id,
+                "--actor",
+                "agent-retry",
+            ],
+            &backend,
+        );
+        assert_eq!(retried.exit_code, 0, "stderr={}", retried.stderr);
+        let retry_task_id = serde_json::from_str::<serde_json::Value>(&retried.stdout).unwrap()
+            ["retry_task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let shown = run_for_test(&["task", "--json", "show", &retry_task_id], &backend);
+        assert_eq!(shown.exit_code, 0, "stderr={}", shown.stderr);
+        let value: serde_json::Value = serde_json::from_str(&shown.stdout).unwrap();
+        let submitted_event = value["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["event_type"] == "submitted")
+            .unwrap();
+        assert_eq!(submitted_event["actor_agent_id"], "agent-retry");
+        assert_eq!(submitted_event["detail"], format!("source_task_id={task_id}"));
 
         cleanup_db(&db_path);
     }
