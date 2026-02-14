@@ -545,23 +545,26 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
     } else {
         0
     };
+    let mut index = start;
     let mut json = false;
     let mut jsonl = false;
     let mut quiet = false;
-    let mut tokens = Vec::new();
 
-    for arg in &args[start..] {
-        match arg.as_str() {
+    while index < args.len() {
+        match args[index].as_str() {
             "--json" => {
                 json = true;
+                index += 1;
             }
             "--jsonl" => {
                 jsonl = true;
+                index += 1;
             }
             "--quiet" => {
                 quiet = true;
+                index += 1;
             }
-            _ => tokens.push(arg.clone()),
+            _ => break,
         }
     }
 
@@ -569,7 +572,7 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
         return Err("--json and --jsonl are mutually exclusive".to_string());
     }
 
-    if tokens.is_empty() {
+    if index >= args.len() {
         return Ok(ParsedArgs {
             command: Command::Help,
             json,
@@ -578,13 +581,15 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
         });
     }
 
-    let command = match tokens[0].as_str() {
+    let subcommand = args[index].as_str();
+    index += 1;
+    let command = match subcommand {
         "help" | "-h" | "--help" => Command::Help,
-        "send" => parse_send_args(&tokens, 1)?,
-        "ls" | "list" => parse_list_args(&tokens, 1)?,
-        "show" => parse_show_args(&tokens, 1)?,
-        "assign" => parse_assign_args(&tokens, 1)?,
-        "retry" => parse_retry_args(&tokens, 1)?,
+        "send" => parse_send_args(args, index)?,
+        "ls" | "list" => parse_list_args(args, index)?,
+        "show" => parse_show_args(args, index)?,
+        "assign" => parse_assign_args(args, index)?,
+        "retry" => parse_retry_args(args, index)?,
         other => return Err(format!("unknown task subcommand: {other}")),
     };
 
@@ -947,6 +952,7 @@ mod tests {
         let sent = run_for_test(
             &[
                 "task",
+                "--json",
                 "send",
                 "--team",
                 "ops",
@@ -956,7 +962,6 @@ mod tests {
                 "pipeline down",
                 "--priority",
                 "5",
-                "--json",
             ],
             &backend,
         );
@@ -970,7 +975,7 @@ mod tests {
         assert!(listed.stdout.contains("queued"));
 
         let assigned = run_for_test(
-            &["task", "assign", &task_id, "--agent", "agent-a", "--json"],
+            &["task", "--json", "assign", &task_id, "--agent", "agent-a"],
             &backend,
         );
         assert_eq!(assigned.exit_code, 0, "stderr={}", assigned.stderr);
@@ -984,7 +989,7 @@ mod tests {
 
         mark_failed(&db_path, &task_id);
 
-        let retried = run_for_test(&["task", "retry", &task_id, "--json"], &backend);
+        let retried = run_for_test(&["task", "--json", "retry", &task_id], &backend);
         assert_eq!(retried.exit_code, 0, "stderr={}", retried.stderr);
         let retry_value: serde_json::Value = serde_json::from_str(&retried.stdout).unwrap();
         assert_eq!(retry_value["source_task_id"], task_id);
@@ -1006,6 +1011,7 @@ mod tests {
         let sent = run_for_test(
             &[
                 "task",
+                "--json",
                 "send",
                 "--team",
                 "ops",
@@ -1013,7 +1019,6 @@ mod tests {
                 "incident",
                 "--title",
                 "pipeline down",
-                "--json",
             ],
             &backend,
         );
@@ -1026,6 +1031,39 @@ mod tests {
         let retry = run_for_test(&["task", "retry", &task_id], &backend);
         assert_eq!(retry.exit_code, 1);
         assert!(retry.stderr.contains("retry requires terminal task status"));
+
+        cleanup_db(&db_path);
+    }
+
+    #[test]
+    fn send_keeps_literal_title_named_json_flag() {
+        let db_path = temp_db_path("send-literal-json-title");
+        seed_team(&db_path, "ops");
+        let backend = SqliteTaskBackend::new(db_path.clone());
+
+        let sent = run_for_test(
+            &[
+                "task",
+                "--json",
+                "send",
+                "--team",
+                "ops",
+                "--type",
+                "incident",
+                "--title",
+                "--json",
+            ],
+            &backend,
+        );
+        assert_eq!(sent.exit_code, 0, "stderr={}", sent.stderr);
+        let task_id = serde_json::from_str::<serde_json::Value>(&sent.stdout).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let shown = run_for_test(&["task", "show", &task_id], &backend);
+        assert_eq!(shown.exit_code, 0, "stderr={}", shown.stderr);
+        assert!(shown.stdout.contains("title: --json"));
 
         cleanup_db(&db_path);
     }
