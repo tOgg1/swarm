@@ -466,6 +466,10 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
         }
     }
 
+    if json && jsonl {
+        return Err("--json and --jsonl are mutually exclusive".to_string());
+    }
+
     if index >= args.len() {
         return Ok(ParsedArgs {
             command: Command::Help,
@@ -897,5 +901,14 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.contains("invalid auth state"));
+    }
+
+    #[test]
+    fn rejects_json_and_jsonl_together() {
+        let path = super::temp_path("json-conflict");
+        let store = MeshStore::with_path(path);
+        let out = run_for_test(&["mesh", "--json", "--jsonl", "status"], &store);
+        assert_eq!(out.exit_code, 1);
+        assert!(out.stderr.contains("--json and --jsonl are mutually exclusive"));
     }
 }

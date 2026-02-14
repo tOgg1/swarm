@@ -253,6 +253,10 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
         }
     }
 
+    if json && jsonl {
+        return Err("--json and --jsonl are mutually exclusive".to_string());
+    }
+
     if index >= args.len() {
         return Ok(ParsedArgs {
             command: Command::Help,
@@ -747,5 +751,25 @@ mod tests {
         assert!(out.stdout.contains("source=team:ops"));
         assert!(out.stdout.contains("target_agent=ops-agent"));
         assert!(out.stdout.contains("rule=ops-rule"));
+    }
+
+    #[test]
+    fn rejects_json_and_jsonl_together() {
+        let backend = InMemoryDelegationBackend::default();
+        let out = run_for_test(
+            &[
+                "delegation",
+                "--json",
+                "--jsonl",
+                "route",
+                "--payload",
+                r#"{"type":"incident","repo":"forge","priority":1,"tags":[],"paths":[]}"#,
+                "--rules",
+                r#"{"default_agent":"fallback","rules":[]}"#,
+            ],
+            &backend,
+        );
+        assert_eq!(out.exit_code, 1);
+        assert!(out.stderr.contains("--json and --jsonl are mutually exclusive"));
     }
 }

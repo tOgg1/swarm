@@ -874,6 +874,10 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
         }
     }
 
+    if json && jsonl {
+        return Err("--json and --jsonl are mutually exclusive".to_string());
+    }
+
     if index >= args.len() {
         return Ok(ParsedArgs {
             command: Command::Help,
@@ -1478,6 +1482,15 @@ mod tests {
             Err(err) => panic!("remove trigger: {err}"),
         };
         assert_eq!(removed.trigger_id, trigger.trigger_id);
+        cleanup(&store);
+    }
+
+    #[test]
+    fn rejects_json_and_jsonl_together() {
+        let store = temp_store("json-conflict");
+        let out = run_for_test(&["job", "--json", "--jsonl", "ls"], &store);
+        assert_eq!(out.exit_code, 1);
+        assert!(out.stderr.contains("--json and --jsonl are mutually exclusive"));
         cleanup(&store);
     }
 }

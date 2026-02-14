@@ -661,6 +661,10 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
         }
     }
 
+    if json && jsonl {
+        return Err("--json and --jsonl are mutually exclusive".to_string());
+    }
+
     if index >= args.len() {
         return Ok(ParsedArgs {
             command: Command::Help,
@@ -1182,6 +1186,15 @@ mod tests {
         let out = run_for_test(&["registry", "ls", "agents", "prompts"], &store);
         assert_eq!(out.exit_code, 1);
         assert!(out.stderr.contains("usage: forge registry ls [all|agents|prompts]"));
+        cleanup(&store);
+    }
+
+    #[test]
+    fn rejects_json_and_jsonl_together() {
+        let store = seed_store();
+        let out = run_for_test(&["registry", "--json", "--jsonl", "status"], &store);
+        assert_eq!(out.exit_code, 1);
+        assert!(out.stderr.contains("--json and --jsonl are mutually exclusive"));
         cleanup(&store);
     }
 }
