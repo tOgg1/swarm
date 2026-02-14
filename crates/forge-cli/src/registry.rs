@@ -738,6 +738,7 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
         }
         "ls" | "list" => {
             let mut kind = RegistryListKind::All;
+            let mut scope_seen = false;
             while index < args.len() {
                 match args[index].as_str() {
                     "--repo" => {
@@ -749,7 +750,14 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
                         index += 1;
                     }
                     token => {
+                        if scope_seen {
+                            return Err(
+                                "usage: forge registry ls [all|agents|prompts] [--repo <path>]"
+                                    .to_string(),
+                            );
+                        }
                         kind = parse_registry_list_kind(token)?;
+                        scope_seen = true;
                         index += 1;
                     }
                 }
@@ -1165,6 +1173,15 @@ mod tests {
         let out = run_for_test(&["registry", "update", "prompt", "triage"], &store);
         assert_eq!(out.exit_code, 1);
         assert!(out.stderr.contains("prompt path is required"));
+        cleanup(&store);
+    }
+
+    #[test]
+    fn list_rejects_multiple_scope_tokens() {
+        let store = seed_store();
+        let out = run_for_test(&["registry", "ls", "agents", "prompts"], &store);
+        assert_eq!(out.exit_code, 1);
+        assert!(out.stderr.contains("usage: forge registry ls [all|agents|prompts]"));
         cleanup(&store);
     }
 }
