@@ -378,8 +378,6 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
 
     let mut json = false;
     let mut jsonl = false;
-    let mut positionals: Vec<String> = Vec::new();
-
     let mut index = start;
     while index < args.len() {
         match args[index].as_str() {
@@ -394,14 +392,7 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
             "--quiet" => {
                 index += 1;
             }
-            "-h" | "--help" => {
-                positionals.push(args[index].clone());
-                index += 1;
-            }
-            _ => {
-                positionals.push(args[index].clone());
-                index += 1;
-            }
+            _ => break,
         }
     }
 
@@ -409,29 +400,45 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
         return Err("error: --json and --jsonl cannot be used together".to_string());
     }
 
-    let command = match positionals.first().map(String::as_str) {
-        None | Some("help") | Some("-h") | Some("--help") => NodeCommand::Help,
-        Some("ls") | Some("list") => NodeCommand::List,
-        Some("exec") => {
-            let node_id = positionals
-                .get(1)
+    if index >= args.len() {
+        return Ok(ParsedArgs {
+            command: NodeCommand::Help,
+            json,
+            jsonl,
+        });
+    }
+
+    let subcommand = args[index].as_str();
+    index += 1;
+    let command = match subcommand {
+        "help" | "-h" | "--help" => NodeCommand::Help,
+        "ls" | "list" => {
+            if index < args.len() {
+                return Err("usage: forge node ls".to_string());
+            }
+            NodeCommand::List
+        }
+        "exec" => {
+            let node_id = args
+                .get(index)
                 .ok_or_else(|| "usage: forge node exec <node-id> -- <command>".to_string())?
                 .clone();
-            let dash = positionals
-                .iter()
-                .position(|token| token == "--")
-                .ok_or_else(|| "usage: forge node exec <node-id> -- <command>".to_string())?;
-            if dash <= 1 || dash + 1 >= positionals.len() {
+            index += 1;
+            let Some(separator) = args.get(index) else {
+                return Err("usage: forge node exec <node-id> -- <command>".to_string());
+            };
+            if separator != "--" {
                 return Err("usage: forge node exec <node-id> -- <command>".to_string());
             }
-            if dash != 2 {
+            index += 1;
+            if index >= args.len() {
                 return Err("usage: forge node exec <node-id> -- <command>".to_string());
             }
-            let command = positionals[dash + 1..].join(" ");
+            let command = args[index..].join(" ");
             NodeCommand::Exec { node_id, command }
         }
-        Some("registry") => parse_registry_command(&positionals[1..])?,
-        Some(other) => return Err(format!("unknown node subcommand: {other}")),
+        "registry" => parse_registry_command(&args[index..])?,
+        other => return Err(format!("unknown node subcommand: {other}")),
     };
 
     Ok(ParsedArgs {
@@ -775,6 +782,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_exec_preserves_tokens_after_separator() {
+        let args = vec![
+            "node".to_string(),
+            "exec".to_string(),
+            "node-a".to_string(),
+            "--".to_string(),
+            "echo".to_string(),
+            "--json".to_string(),
+            "--quiet".to_string(),
+        ];
+        let parsed = ok_or_panic(parse_args(&args), "parse exec preserving flags");
+        match parsed.command {
+            NodeCommand::Exec { node_id, command } => {
+                assert_eq!(node_id, "node-a");
+                assert_eq!(command, "echo --json --quiet");
+            }
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_registry_requires_node_id() {
         let args = vec!["node".to_string(), "registry".to_string(), "ls".to_string()];
         let err = err_or_panic(parse_args(&args), "parse should fail without node id");
@@ -920,7 +948,7 @@ mod tests {
         let mut backend = InMemoryNodeBackend::with_status(mesh_status());
 
         let out = run_for_test(
-            &["node", "registry", "--json", "ls", "node-worker", "agents"],
+            &["node", "--json", "registry", "ls", "node-worker", "agents"],
             &mut backend,
         );
 
