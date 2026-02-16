@@ -6,7 +6,12 @@
 use forge_ftui_adapter::render::{Rect, RenderFrame, TermColor, TextRole};
 use forge_ftui_adapter::widgets::BorderStyle;
 
+use crate::activity_heatmap::{build_loop_activity_trends, LoopTrendBucket, LoopTrendInput};
 use crate::app::{LoopView, RunView};
+use crate::health_heatmap_timeline::{
+    build_cross_loop_health_timeline, render_cross_loop_heatmap_lines, LoopHealthBucket,
+    LoopHealthTimelineInput,
+};
 use crate::hero_widgets::{build_fleet_snapshot, FleetSnapshot};
 use crate::smart_loop_clustering::{cluster_loops_by_domain, compact_domain_summary};
 use crate::theme::ResolvedPalette;
@@ -20,6 +25,13 @@ pub struct OverviewLine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OverviewPaneOptions {
     pub reserve_next_action_slot: bool,
+}
+
+#[derive(Debug, Clone)]
+struct DetailField {
+    text: String,
+    color: TermColor,
+    bold: bool,
 }
 
 fn push_unique_action(actions: &mut Vec<String>, text: &str) {
@@ -449,29 +461,32 @@ pub fn render_overview_paneled_with_options(
     let detail_fields = build_detail_fields(loop_view, pal);
     let detail_h = (detail_fields.len() + 2).min(rest.height); // +2 for borders
     let (detail_rect, rest2) = rest.split_vertical(detail_h);
+    let loop_status_color = loop_status_color(&loop_view.state, pal);
     let detail_title = format!(
-        "Loop: {}",
-        display_name(&loop_view.name, &loop_display_id(loop_view))
+        "Loop: {} [{}]",
+        display_name(&loop_view.name, &loop_display_id(loop_view)),
+        loop_view.state.trim().to_ascii_uppercase()
     );
     let detail_inner = frame.draw_panel(
         detail_rect,
         &detail_title,
         BorderStyle::Rounded,
-        pal.accent,
+        loop_status_color,
         pal.panel,
     );
-    for (i, (text, color)) in detail_fields.iter().enumerate() {
+    for (i, field) in detail_fields.iter().enumerate() {
         if i >= detail_inner.height {
             break;
         }
-        let trunc = truncate_line(text, detail_inner.width);
-        draw_text_on_bg(
+        let trunc = truncate_line(&field.text, detail_inner.width);
+        draw_text_on_bg_with_weight(
             frame,
             detail_inner.x,
             detail_inner.y + i,
             &trunc,
-            *color,
+            field.color,
             pal.panel,
+            field.bold,
         );
     }
 
@@ -485,11 +500,18 @@ pub fn render_overview_paneled_with_options(
             if has_domain_panel { 4 } else { 0 } + if has_next_action_slot { 4 } else { 0 };
         let snap_h = 4usize.min(rest2.height.saturating_sub(reserved_rows));
         let (snap_rect, rest3) = rest2.split_vertical(snap_h);
+        let run_health_color = if counts.error > 0 {
+            pal.error
+        } else if counts.running > 0 {
+            pal.success
+        } else {
+            pal.text
+        };
         let snap_inner = frame.draw_panel(
             snap_rect,
             "Run Snapshot",
             BorderStyle::Rounded,
-            pal.border,
+            run_health_color,
             pal.panel,
         );
         let summary = format!(
@@ -500,17 +522,19 @@ pub fn render_overview_paneled_with_options(
             counts.killed,
             counts.running,
         );
-        draw_text_on_bg(
+        draw_text_on_bg_with_weight(
             frame,
             snap_inner.x,
             snap_inner.y,
             &truncate_line(&summary, snap_inner.width),
-            pal.text,
+            run_health_color,
             pal.panel,
+            true,
         );
         if !run_history.is_empty() && snap_inner.height > 1 {
             let idx = selected_run.min(run_history.len().saturating_sub(1));
             let run = &run_history[idx];
+            let latest_status_color = run_status_color(&run.status, pal);
             let latest = format!(
                 "latest={}  status={}  exit={}  duration={}",
                 short_run_id(&run.id),
@@ -518,20 +542,21 @@ pub fn render_overview_paneled_with_options(
                 run_exit_code(run),
                 format_run_duration(run),
             );
-            draw_text_on_bg(
+            draw_text_on_bg_with_weight(
                 frame,
                 snap_inner.x,
                 snap_inner.y + 1,
                 &truncate_line(&latest, snap_inner.width),
-                pal.text_muted,
+                latest_status_color,
                 pal.panel,
+                true,
             );
         }
 
         let mut rest = rest3;
 
         // -- Work domain panel (smart loop clustering) --
-        if has_domain_panel {
+        if has_domain_panel && rest.height >= 4 {
             let domain_h = 4usize.min(rest.height);
             let (domain_rect, rest_after_domain) = rest.split_vertical(domain_h);
             rest = rest_after_domain;
@@ -611,6 +636,14 @@ pub fn render_overview_paneled_with_options(
                     pal.panel,
                 );
             }
+        }
+
+        // -- Activity heatmap panel (selected loop + cross-loop health strip) --
+        if rest.height >= 3 {
+            let heatmap_h = 4usize.min(rest.height);
+            let (heatmap_rect, rest_after_heatmap) = rest.split_vertical(heatmap_h);
+            rest = rest_after_heatmap;
+            render_activity_heatmap_panel(frame, heatmap_rect, loops, loop_view, run_history, pal);
         }
 
         // -- Workflow hint --
@@ -711,62 +744,338 @@ fn render_fleet_hero(
     }
 }
 
-/// Build structured detail fields for a loop.
-fn build_detail_fields(lv: &LoopView, pal: &ResolvedPalette) -> Vec<(String, TermColor)> {
-    let status_upper = lv.state.trim().to_ascii_uppercase();
-    let status_color = match lv.state.trim().to_ascii_lowercase().as_str() {
+fn render_activity_heatmap_panel(
+    frame: &mut RenderFrame,
+    rect: Rect,
+    loops: &[LoopView],
+    selected_loop: &LoopView,
+    run_history: &[RunView],
+    pal: &ResolvedPalette,
+) {
+    let inner = frame.draw_panel(
+        rect,
+        "Heatmaps & Trends",
+        BorderStyle::Rounded,
+        pal.info,
+        pal.panel,
+    );
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let mut row = 0usize;
+    if let Some(trend) = build_selected_loop_trend(selected_loop, run_history) {
+        let summary_color = if trend.summary.error_rate_pct >= 50 {
+            pal.error
+        } else if trend.summary.error_rate_pct >= 20 {
+            pal.warning
+        } else {
+            pal.success
+        };
+        let activity_line = format!(
+            "{} activity {}",
+            loop_display_id(selected_loop),
+            trend.activity_heatmap
+        );
+        draw_text_on_bg_with_weight(
+            frame,
+            inner.x,
+            inner.y + row,
+            &truncate_line(&activity_line, inner.width),
+            summary_color,
+            pal.panel,
+            true,
+        );
+        row += 1;
+
+        if row < inner.height {
+            let sparkline_line = format!(
+                "run:{} err:{} dur:{} lat:{}",
+                trend.run_rate_sparkline,
+                trend.error_rate_sparkline,
+                trend.duration_sparkline,
+                trend.latency_sparkline
+            );
+            draw_text_on_bg(
+                frame,
+                inner.x,
+                inner.y + row,
+                &truncate_line(&sparkline_line, inner.width),
+                pal.text,
+                pal.panel,
+            );
+            row += 1;
+        }
+
+        if row < inner.height {
+            let summary_line = format!(
+                "err:{}% runs:{} peak-lat:{}ms",
+                trend.summary.error_rate_pct,
+                trend.summary.total_runs,
+                trend.summary.peak_latency_ms
+            );
+            draw_text_on_bg(
+                frame,
+                inner.x,
+                inner.y + row,
+                &truncate_line(&summary_line, inner.width),
+                summary_color,
+                pal.panel,
+            );
+            row += 1;
+        }
+    } else {
+        let empty_line = "No run history yet for selected loop";
+        draw_text_on_bg(
+            frame,
+            inner.x,
+            inner.y + row,
+            &truncate_line(empty_line, inner.width),
+            pal.text_muted,
+            pal.panel,
+        );
+        row += 1;
+    }
+
+    if row < inner.height {
+        let health = build_cross_loop_health_strip(loops);
+        let max_rows = inner.height.saturating_sub(row);
+        let lines = render_cross_loop_heatmap_lines(&health, inner.width, max_rows);
+        for (offset, line) in lines.iter().enumerate() {
+            let y = inner.y + row + offset;
+            if y >= inner.y + inner.height {
+                break;
+            }
+            let color = if line.contains('X') {
+                pal.error
+            } else if line.contains('!') {
+                pal.warning
+            } else {
+                pal.text_muted
+            };
+            draw_text_on_bg(frame, inner.x, y, line, color, pal.panel);
+        }
+    }
+}
+
+fn build_selected_loop_trend(
+    selected_loop: &LoopView,
+    run_history: &[RunView],
+) -> Option<crate::activity_heatmap::LoopTrendVisual> {
+    if run_history.is_empty() {
+        return None;
+    }
+
+    let mut buckets = Vec::new();
+    for (idx, run) in run_history.iter().enumerate().take(24) {
+        let status = run.status.trim().to_ascii_lowercase();
+        let duration_ms = parse_duration_ms(&run.duration).unwrap_or_else(|| {
+            if status == "running" {
+                0
+            } else {
+                1_000
+            }
+        });
+        let error_count = usize::from(status == "error") as u32;
+        let latency_penalty = if error_count > 0 { 750 } else { 150 };
+        buckets.push(LoopTrendBucket {
+            timestamp_epoch_s: idx as i64,
+            run_count: 1,
+            error_count,
+            avg_duration_ms: duration_ms,
+            avg_latency_ms: duration_ms.saturating_add(latency_penalty),
+        });
+    }
+    buckets.reverse();
+
+    let input = LoopTrendInput {
+        loop_id: selected_loop.id.clone(),
+        buckets,
+    };
+    build_loop_activity_trends(&[input], 24).into_iter().next()
+}
+
+fn build_cross_loop_health_strip(
+    loops: &[LoopView],
+) -> crate::health_heatmap_timeline::CrossLoopHealthTimeline {
+    let mut inputs = Vec::with_capacity(loops.len());
+    for loop_view in loops {
+        let mut buckets = Vec::new();
+        for idx in 0..12 {
+            let is_error = loop_view.state.eq_ignore_ascii_case("error")
+                || !loop_view.last_error.trim().is_empty();
+            buckets.push(LoopHealthBucket {
+                timestamp_epoch_s: idx as i64,
+                state: loop_view.state.clone(),
+                run_count: if loop_view.runs == 0 { 0 } else { 1 },
+                error_count: if is_error && idx % 3 == 0 { 1 } else { 0 },
+                queue_depth: loop_view.queue_depth,
+                stalled: loop_view.state.eq_ignore_ascii_case("waiting") && idx >= 8,
+            });
+        }
+        inputs.push(LoopHealthTimelineInput {
+            loop_id: loop_display_id(loop_view),
+            buckets,
+        });
+    }
+    build_cross_loop_health_timeline(&inputs, 12)
+}
+
+fn parse_duration_ms(raw: &str) -> Option<u64> {
+    let value = raw.trim().to_ascii_lowercase();
+    if value.is_empty() || value == "-" || value == "running" || value == "done" {
+        return None;
+    }
+
+    let mut total = 0f64;
+    let mut current = String::new();
+    let chars = value.chars().collect::<Vec<_>>();
+    let mut idx = 0usize;
+    while idx < chars.len() {
+        let ch = chars[idx];
+        if ch.is_ascii_digit() || ch == '.' {
+            current.push(ch);
+            idx += 1;
+            continue;
+        }
+
+        let parsed = current.parse::<f64>().ok()?;
+        current.clear();
+        if ch == 'm' && idx + 1 < chars.len() && chars[idx + 1] == 's' {
+            total += parsed;
+            idx += 2;
+            continue;
+        }
+
+        total += match ch {
+            'h' => parsed * 3_600_000.0,
+            'm' => parsed * 60_000.0,
+            's' => parsed * 1_000.0,
+            _ => return None,
+        };
+        idx += 1;
+    }
+
+    if !current.is_empty() {
+        total += current.parse::<f64>().ok()? * 1_000.0;
+    }
+    if total.is_sign_negative() {
+        return None;
+    }
+    Some(total.round() as u64)
+}
+
+fn loop_status_color(state: &str, pal: &ResolvedPalette) -> TermColor {
+    match state.trim().to_ascii_lowercase().as_str() {
         "running" => pal.success,
         "error" => pal.error,
         "stopped" => pal.warning,
+        "sleeping" | "waiting" => pal.info,
         _ => pal.text_muted,
+    }
+}
+
+fn run_status_color(status: &str, pal: &ResolvedPalette) -> TermColor {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "success" => pal.success,
+        "error" => pal.error,
+        "killed" => pal.warning,
+        "running" => pal.info,
+        _ => pal.text_muted,
+    }
+}
+
+/// Build structured detail fields for a loop.
+fn build_detail_fields(lv: &LoopView, pal: &ResolvedPalette) -> Vec<DetailField> {
+    let status_upper = lv.state.trim().to_ascii_uppercase();
+    let status_color = loop_status_color(&lv.state, pal);
+    let queue_color = if lv.queue_depth > 0 {
+        pal.warning
+    } else {
+        pal.text
     };
 
     let mut fields = Vec::with_capacity(14);
-    fields.push((format!("ID: {}", loop_display_id(lv)), pal.text));
-    fields.push((format!("Status: {status_upper}"), status_color));
-    fields.push((format!("Runs: {}", lv.runs), pal.text));
-    fields.push((format!("Dir: {}", lv.repo_path), pal.text_muted));
-    fields.push((
-        format!("Pool: {}", display_name(&lv.pool_name, &lv.pool_id)),
-        pal.text,
-    ));
-    fields.push((
-        format!(
+    fields.push(DetailField {
+        text: format!(
+            "Name: {} ({})",
+            display_name(&lv.name, &loop_display_id(lv)),
+            loop_display_id(lv)
+        ),
+        color: pal.accent,
+        bold: true,
+    });
+    fields.push(DetailField {
+        text: format!("Status: {status_upper}"),
+        color: status_color,
+        bold: true,
+    });
+    fields.push(DetailField {
+        text: format!("Runs: {}", lv.runs),
+        color: pal.text,
+        bold: false,
+    });
+    fields.push(DetailField {
+        text: format!("Queue Depth: {}", lv.queue_depth),
+        color: queue_color,
+        bold: lv.queue_depth > 0,
+    });
+    fields.push(DetailField {
+        text: format!(
             "Profile: {}",
             display_name(&lv.profile_name, &lv.profile_id)
         ),
-        pal.text,
-    ));
-    fields.push((
-        format!(
+        color: pal.text,
+        bold: false,
+    });
+    fields.push(DetailField {
+        text: format!("Pool: {}", display_name(&lv.pool_name, &lv.pool_id)),
+        color: pal.text,
+        bold: false,
+    });
+    fields.push(DetailField {
+        text: format!("Dir: {}", lv.repo_path),
+        color: pal.text_muted,
+        bold: false,
+    });
+    fields.push(DetailField {
+        text: format!(
             "Harness/Auth: {} / {}",
             display_name(&lv.profile_harness, "-"),
             display_name(&lv.profile_auth, "-"),
         ),
-        pal.text_muted,
-    ));
-    fields.push((
-        format!("Last Run: {}", format_time(lv.last_run_at.as_deref())),
-        pal.text_muted,
-    ));
-    fields.push((format!("Queue Depth: {}", lv.queue_depth), pal.text));
-    fields.push((
-        format!("Interval: {}", format_duration_seconds(lv.interval_seconds)),
-        pal.text,
-    ));
-    fields.push((
-        format!(
+        color: pal.text_muted,
+        bold: false,
+    });
+    fields.push(DetailField {
+        text: format!("Last Run: {}", format_time(lv.last_run_at.as_deref())),
+        color: pal.text_muted,
+        bold: false,
+    });
+    fields.push(DetailField {
+        text: format!("Interval: {}", format_duration_seconds(lv.interval_seconds)),
+        color: pal.text,
+        bold: false,
+    });
+    fields.push(DetailField {
+        text: format!(
             "Max Runtime: {}",
             format_duration_seconds(lv.max_runtime_seconds)
         ),
-        pal.text,
-    ));
-    fields.push((
-        format!("Max Iterations: {}", format_iterations(lv.max_iterations)),
-        pal.text,
-    ));
+        color: pal.text,
+        bold: false,
+    });
+    fields.push(DetailField {
+        text: format!("Max Iterations: {}", format_iterations(lv.max_iterations)),
+        color: pal.text,
+        bold: false,
+    });
     if !lv.last_error.trim().is_empty() {
-        fields.push((format!("Last Error: {}", lv.last_error), pal.error));
+        fields.push(DetailField {
+            text: format!("Last Error: {}", lv.last_error),
+            color: pal.error,
+            bold: true,
+        });
     }
     fields
 }
@@ -780,7 +1089,19 @@ fn draw_text_on_bg(
     fg: TermColor,
     bg: TermColor,
 ) {
-    frame.draw_styled_text(x, y, text, fg, bg, false);
+    draw_text_on_bg_with_weight(frame, x, y, text, fg, bg, false);
+}
+
+fn draw_text_on_bg_with_weight(
+    frame: &mut RenderFrame,
+    x: usize,
+    y: usize,
+    text: &str,
+    fg: TermColor,
+    bg: TermColor,
+    bold: bool,
+) {
+    frame.draw_styled_text(x, y, text, fg, bg, bold);
 }
 
 #[cfg(test)]

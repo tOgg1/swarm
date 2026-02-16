@@ -1,24 +1,39 @@
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::app::{
+    ActionKind, ActionResult, ActionType, App, Command as AppCommand, LogTailView, LoopView,
+    RunView,
+};
+use crate::theme::detect_terminal_color_capability;
+use forge_cli::{kill, resume, rm, stop, up};
 use forge_ftui_adapter::input::{
     translate_input, InputEvent, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
     MouseWheelDirection, ResizeEvent, UiAction,
 };
+use forge_ftui_adapter::render::FrameCell as AdapterFrameCell;
+use forge_ftui_adapter::upstream_bridge::term_color_to_packed_rgba;
 use forge_ftui_adapter::upstream_ftui as ftui;
 use ftui::core::event::{
     Event, KeyCode as FtuiKeyCode, KeyEvent as FtuiKeyEvent, KeyEventKind as FtuiKeyEventKind,
     Modifiers as FtuiModifiers, MouseEvent as FtuiMouseEvent, MouseEventKind as FtuiMouseEventKind,
 };
-use ftui::render::cell::Cell;
-use ftui::render::drawing::Draw;
+use ftui::render::cell::{Cell, CellAttrs as FtuiCellAttrs, StyleFlags as FtuiCellStyleFlags};
 use ftui::runtime::{Every, Subscription};
 use ftui::{App as FtuiApp, Cmd, Frame, Model, ScreenMode};
 
 const REFRESH_INTERVAL_MS: u64 = 900;
-const INLINE_UI_HEIGHT: u16 = 10;
-const INLINE_AUTO_MIN_HEIGHT: u16 = 6;
-const INLINE_AUTO_MAX_HEIGHT: u16 = 20;
+const LOG_TAIL_MAX_LINES: usize = 240;
+const LOG_TAIL_READ_BYTES: u64 = 256 * 1024;
+const RUN_HISTORY_LIMIT: usize = 120;
+type LiveData = (
+    Vec<LoopView>,
+    HashMap<String, Vec<RunView>>,
+    HashMap<String, LogTailView>,
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeEvent {
@@ -28,7 +43,7 @@ pub enum RuntimeEvent {
     Ignore,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum ForgeShellMsg {
     Runtime(RuntimeEvent),
     SnapshotLoaded(BootstrapSnapshot),
@@ -40,17 +55,25 @@ impl From<Event> for ForgeShellMsg {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct BootstrapSnapshot {
-    pub loop_count: usize,
+    pub loops: Vec<LoopView>,
+    pub run_history_by_loop: HashMap<String, Vec<RunView>>,
+    pub log_tails_by_loop: HashMap<String, LogTailView>,
     pub refreshed_at_epoch_secs: u64,
     pub error: Option<String>,
 }
 
 impl BootstrapSnapshot {
-    fn ok(loop_count: usize) -> Self {
+    fn ok(
+        loops: Vec<LoopView>,
+        run_history_by_loop: HashMap<String, Vec<RunView>>,
+        log_tails_by_loop: HashMap<String, LogTailView>,
+    ) -> Self {
         Self {
-            loop_count,
+            loops,
+            run_history_by_loop,
+            log_tails_by_loop,
             refreshed_at_epoch_secs: unix_timestamp_secs(),
             error: None,
         }
@@ -58,7 +81,9 @@ impl BootstrapSnapshot {
 
     fn err(message: String) -> Self {
         Self {
-            loop_count: 0,
+            loops: Vec::new(),
+            run_history_by_loop: HashMap::new(),
+            log_tails_by_loop: HashMap::new(),
             refreshed_at_epoch_secs: unix_timestamp_secs(),
             error: Some(message),
         }
@@ -67,7 +92,8 @@ impl BootstrapSnapshot {
 
 pub struct ForgeShell {
     db_path: PathBuf,
-    loop_count: usize,
+    spawn_owner: String,
+    app: App,
     refresh_count: usize,
     last_action: UiAction,
     last_event: RuntimeEvent,
@@ -78,9 +104,11 @@ pub struct ForgeShell {
 impl ForgeShell {
     #[must_use]
     pub fn new(db_path: PathBuf) -> Self {
+        let capability = detect_terminal_color_capability();
         Self {
             db_path,
-            loop_count: 0,
+            spawn_owner: resolve_spawn_owner(),
+            app: App::new_with_capability("default", capability, 200),
             refresh_count: 0,
             last_action: UiAction::Noop,
             last_event: RuntimeEvent::Ignore,
@@ -90,14 +118,250 @@ impl ForgeShell {
     }
 
     fn apply_snapshot(&mut self, snapshot: BootstrapSnapshot) {
-        self.loop_count = snapshot.loop_count;
         self.last_refreshed_at_epoch_secs = snapshot.refreshed_at_epoch_secs;
-        self.last_error = snapshot.error;
         self.refresh_count = self.refresh_count.saturating_add(1);
+
+        self.app.set_loops(snapshot.loops.clone());
+        let selected_loop_id = self.selected_loop_id();
+        let selected_runs = snapshot
+            .run_history_by_loop
+            .get(&selected_loop_id)
+            .cloned()
+            .unwrap_or_default();
+        self.app.set_run_history(selected_runs);
+
+        let selected_log = snapshot
+            .log_tails_by_loop
+            .get(&selected_loop_id)
+            .cloned()
+            .unwrap_or_else(|| LogTailView {
+                lines: Vec::new(),
+                message: "No logs captured yet".to_owned(),
+            });
+        self.app.set_selected_log(selected_log);
+        self.app.set_multi_logs(snapshot.log_tails_by_loop);
+
+        self.last_error = snapshot.error.clone();
+        if let Some(error) = snapshot.error {
+            let _ = self.app.handle_action_result(ActionResult {
+                kind: ActionType::None,
+                loop_id: String::new(),
+                selected_loop_id: String::new(),
+                message: String::new(),
+                error: Some(error),
+            });
+        }
+    }
+
+    fn selected_loop_id(&self) -> String {
+        if !self.app.selected_id().trim().is_empty() {
+            return self.app.selected_id().to_owned();
+        }
+        self.app
+            .loops()
+            .first()
+            .map(|loop_view| loop_view.id.clone())
+            .unwrap_or_default()
     }
 
     fn perform_refresh(&self, task_name: &'static str) -> Cmd<ForgeShellMsg> {
         perform_refresh(task_name, self.db_path.clone())
+    }
+
+    fn action_result_for_export_not_wired() -> ActionResult {
+        ActionResult {
+            kind: ActionType::None,
+            loop_id: String::new(),
+            selected_loop_id: String::new(),
+            message: String::new(),
+            error: Some("view export not wired in FrankenTUI runtime yet".to_owned()),
+        }
+    }
+
+    fn execute_action(&self, action: ActionKind) -> ActionResult {
+        match action {
+            ActionKind::Resume { loop_id } => {
+                let mut backend = resume::SqliteResumeBackend::new(self.db_path.clone());
+                let mut args = vec!["resume".to_owned(), loop_id.clone(), "--json".to_owned()];
+                if self.spawn_owner != "auto" {
+                    args.push("--spawn-owner".to_owned());
+                    args.push(self.spawn_owner.clone());
+                }
+                let (exit_code, stdout, stderr) = run_resume(&args, &mut backend);
+                if exit_code == 0 {
+                    let message = parse_resume_success_message(&stdout, &loop_id)
+                        .unwrap_or_else(|| format!("Loop {loop_id} resumed"));
+                    ActionResult {
+                        kind: ActionType::Resume,
+                        loop_id,
+                        selected_loop_id: String::new(),
+                        message,
+                        error: None,
+                    }
+                } else {
+                    ActionResult {
+                        kind: ActionType::Resume,
+                        loop_id,
+                        selected_loop_id: String::new(),
+                        message: String::new(),
+                        error: Some(error_from_stderr("resume loop", &stderr)),
+                    }
+                }
+            }
+            ActionKind::Stop { loop_id } => {
+                let mut backend = stop::SqliteStopBackend::new(self.db_path.clone());
+                let args = vec!["stop".to_owned(), loop_id.clone(), "--json".to_owned()];
+                let (exit_code, _stdout, stderr) = run_stop(&args, &mut backend);
+                if exit_code == 0 {
+                    ActionResult {
+                        kind: ActionType::Stop,
+                        loop_id: loop_id.clone(),
+                        selected_loop_id: String::new(),
+                        message: format!("Stop queued for loop {loop_id}"),
+                        error: None,
+                    }
+                } else {
+                    ActionResult {
+                        kind: ActionType::Stop,
+                        loop_id: loop_id.clone(),
+                        selected_loop_id: String::new(),
+                        message: String::new(),
+                        error: Some(error_from_stderr("stop loop", &stderr)),
+                    }
+                }
+            }
+            ActionKind::Kill { loop_id } => {
+                let mut backend = kill::SqliteKillBackend::new(self.db_path.clone());
+                let args = vec!["kill".to_owned(), loop_id.clone(), "--json".to_owned()];
+                let (exit_code, _stdout, stderr) = run_kill(&args, &mut backend);
+                if exit_code == 0 {
+                    ActionResult {
+                        kind: ActionType::Kill,
+                        loop_id: loop_id.clone(),
+                        selected_loop_id: String::new(),
+                        message: format!("Kill queued for loop {loop_id}"),
+                        error: None,
+                    }
+                } else {
+                    ActionResult {
+                        kind: ActionType::Kill,
+                        loop_id: loop_id.clone(),
+                        selected_loop_id: String::new(),
+                        message: String::new(),
+                        error: Some(error_from_stderr("kill loop", &stderr)),
+                    }
+                }
+            }
+            ActionKind::Delete { loop_id, force } => {
+                let mut backend = rm::SqliteLoopBackend::new(self.db_path.clone());
+                let mut args = vec!["rm".to_owned(), loop_id.clone(), "--json".to_owned()];
+                if force {
+                    args.push("--force".to_owned());
+                }
+                let (exit_code, _stdout, stderr) = run_rm(&args, &mut backend);
+                if exit_code == 0 {
+                    ActionResult {
+                        kind: ActionType::Delete,
+                        loop_id: loop_id.clone(),
+                        selected_loop_id: String::new(),
+                        message: format!("Removed loop {loop_id}"),
+                        error: None,
+                    }
+                } else {
+                    ActionResult {
+                        kind: ActionType::Delete,
+                        loop_id: loop_id.clone(),
+                        selected_loop_id: String::new(),
+                        message: String::new(),
+                        error: Some(error_from_stderr("remove loop", &stderr)),
+                    }
+                }
+            }
+            ActionKind::Create { wizard } => {
+                let mut backend = up::SqliteUpBackend::new(self.db_path.clone());
+                let args = build_up_args(&wizard, &self.spawn_owner);
+                let (exit_code, stdout, stderr) = run_up(&args, &mut backend);
+                if exit_code == 0 {
+                    let selected_loop_id =
+                        parse_created_loop_id(&self.db_path, &stdout).unwrap_or_default();
+                    ActionResult {
+                        kind: ActionType::Create,
+                        loop_id: String::new(),
+                        selected_loop_id,
+                        message: create_success_message(&stdout),
+                        error: None,
+                    }
+                } else {
+                    ActionResult {
+                        kind: ActionType::Create,
+                        loop_id: String::new(),
+                        selected_loop_id: String::new(),
+                        message: String::new(),
+                        error: Some(error_from_stderr("create loop", &stderr)),
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_batch_commands(
+        &mut self,
+        commands: Vec<AppCommand>,
+        should_refresh: &mut bool,
+    ) -> bool {
+        for command in commands {
+            match command {
+                AppCommand::None => {}
+                AppCommand::Quit => return true,
+                AppCommand::Fetch => *should_refresh = true,
+                AppCommand::ExportCurrentView => {
+                    let _ = self
+                        .app
+                        .handle_action_result(Self::action_result_for_export_not_wired());
+                }
+                AppCommand::RunAction(action) => {
+                    let follow_up = self.app.handle_action_result(self.execute_action(action));
+                    if self.apply_batch_commands(vec![follow_up], should_refresh) {
+                        return true;
+                    }
+                }
+                AppCommand::Batch(nested) => {
+                    if self.apply_batch_commands(nested, should_refresh) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn handle_app_command(&mut self, command: AppCommand) -> Cmd<ForgeShellMsg> {
+        match command {
+            AppCommand::None => Cmd::none(),
+            AppCommand::Quit => Cmd::quit(),
+            AppCommand::Fetch => self.perform_refresh("forge-shell-app-fetch"),
+            AppCommand::ExportCurrentView => {
+                let _ = self
+                    .app
+                    .handle_action_result(Self::action_result_for_export_not_wired());
+                Cmd::none()
+            }
+            AppCommand::Batch(commands) => {
+                let mut should_refresh = false;
+                if self.apply_batch_commands(commands, &mut should_refresh) {
+                    return Cmd::quit();
+                }
+                if should_refresh {
+                    self.perform_refresh("forge-shell-app-batch-refresh")
+                } else {
+                    Cmd::none()
+                }
+            }
+            AppCommand::RunAction(action) => {
+                let follow_up = self.app.handle_action_result(self.execute_action(action));
+                self.handle_app_command(follow_up)
+            }
+        }
     }
 }
 
@@ -114,13 +378,9 @@ impl Model for ForgeShell {
                 self.last_event = runtime_event;
                 match runtime_event {
                     RuntimeEvent::Input(input) => {
-                        let action = translate_input(&input);
-                        self.last_action = action;
-                        if action == UiAction::Refresh {
-                            self.perform_refresh("forge-shell-input-refresh")
-                        } else {
-                            Cmd::none()
-                        }
+                        self.last_action = translate_input(&input);
+                        let command = self.app.update(input);
+                        self.handle_app_command(command)
                     }
                     RuntimeEvent::Tick => self.perform_refresh("forge-shell-tick-refresh"),
                     RuntimeEvent::Quit => Cmd::quit(),
@@ -135,25 +395,22 @@ impl Model for ForgeShell {
     }
 
     fn view(&self, frame: &mut Frame) {
-        let lines = [
-            "Forge TUI | FrankenTUI bootstrap".to_owned(),
-            format!("db: {}", self.db_path.display()),
-            format!("loops: {}", self.loop_count),
-            format!("refresh-count: {}", self.refresh_count),
-            format!("last-event: {:?}", self.last_event),
-            format!("last-action: {:?}", self.last_action),
-            format!("last-refresh-epoch: {}", self.last_refreshed_at_epoch_secs),
-            format!(
-                "last-error: {}",
-                self.last_error.as_deref().unwrap_or("none")
-            ),
-            "keys: q/ctrl+c quit | r/ctrl+r refresh".to_owned(),
-        ];
+        // This runtime is fully application-driven; never expose a text cursor.
+        frame.set_cursor(None);
+        frame.set_cursor_visible(false);
 
-        let base_cell = Cell::from_char(' ');
-        let max_rows = usize::from(frame.height());
-        for (idx, line) in lines.iter().enumerate().take(max_rows) {
-            frame.print_text(0, idx as u16, line, base_cell);
+        let rendered = self.app.render();
+        let max_rows = usize::from(frame.height()).min(rendered.size().height);
+        let max_cols = usize::from(frame.width()).min(rendered.size().width);
+
+        for row in 0..max_rows {
+            for col in 0..max_cols {
+                if let Some(cell) = rendered.cell(col, row) {
+                    frame
+                        .buffer
+                        .set(col as u16, row as u16, render_frame_cell_to_ftui_cell(cell));
+                }
+            }
         }
     }
 
@@ -173,33 +430,8 @@ pub fn run(db_path: PathBuf) -> Result<(), String> {
 }
 
 #[must_use]
-pub fn resolve_screen_mode_from_env() -> ScreenMode {
-    let mode = std::env::var("FORGE_TUI_SCREEN_MODE")
-        .map(|raw| raw.trim().to_ascii_lowercase())
-        .unwrap_or_else(|_| "inline".to_owned());
-
-    match mode.as_str() {
-        "altscreen" | "alt" | "fullscreen" => ScreenMode::AltScreen,
-        "inline-auto" | "inline_auto" | "auto" => {
-            let min_height =
-                parse_u16_env("FORGE_TUI_INLINE_MIN_HEIGHT").unwrap_or(INLINE_AUTO_MIN_HEIGHT);
-            let mut max_height =
-                parse_u16_env("FORGE_TUI_INLINE_MAX_HEIGHT").unwrap_or(INLINE_AUTO_MAX_HEIGHT);
-            let min_height = min_height.max(1);
-            if max_height < min_height {
-                max_height = min_height;
-            }
-            ScreenMode::InlineAuto {
-                min_height,
-                max_height,
-            }
-        }
-        _ => ScreenMode::Inline {
-            ui_height: parse_u16_env("FORGE_TUI_INLINE_HEIGHT")
-                .unwrap_or(INLINE_UI_HEIGHT)
-                .max(1),
-        },
-    }
+pub const fn resolve_screen_mode_from_env() -> ScreenMode {
+    ScreenMode::AltScreen
 }
 
 #[must_use]
@@ -301,32 +533,266 @@ fn map_mouse_button(button: ftui::core::event::MouseButton) -> Option<MouseButto
     }
 }
 
+fn render_frame_cell_to_ftui_cell(cell: AdapterFrameCell) -> Cell {
+    let mut flags = FtuiCellStyleFlags::empty();
+    if cell.style.bold {
+        flags.insert(FtuiCellStyleFlags::BOLD);
+    }
+    if cell.style.dim {
+        flags.insert(FtuiCellStyleFlags::DIM);
+    }
+    if cell.style.underline {
+        flags.insert(FtuiCellStyleFlags::UNDERLINE);
+    }
+
+    Cell::from_char(cell.glyph)
+        .with_fg(term_color_to_packed_rgba(cell.style.fg))
+        .with_bg(term_color_to_packed_rgba(cell.style.bg))
+        .with_attrs(FtuiCellAttrs::new(flags, FtuiCellAttrs::LINK_ID_NONE))
+}
+
 fn perform_refresh(task_name: &'static str, db_path: PathBuf) -> Cmd<ForgeShellMsg> {
-    // This pin exposes Cmd::task_named; we treat this as our perform path.
     Cmd::task_named(task_name, move || {
         ForgeShellMsg::SnapshotLoaded(load_snapshot(&db_path))
     })
 }
 
 fn load_snapshot(db_path: &Path) -> BootstrapSnapshot {
-    match count_loops(db_path) {
-        Ok(loop_count) => BootstrapSnapshot::ok(loop_count),
+    match load_live_data(db_path) {
+        Ok((loops, runs_by_loop, log_tails_by_loop)) => {
+            BootstrapSnapshot::ok(loops, runs_by_loop, log_tails_by_loop)
+        }
         Err(err) => BootstrapSnapshot::err(err),
     }
 }
 
-fn count_loops(db_path: &Path) -> Result<usize, String> {
+fn load_live_data(db_path: &Path) -> Result<LiveData, String> {
     if !db_path.exists() {
-        return Ok(0);
+        return Ok((Vec::new(), HashMap::new(), HashMap::new()));
     }
 
     let db = forge_db::Db::open(forge_db::Config::new(db_path))
         .map_err(|err| format!("open database {}: {err}", db_path.display()))?;
-    let repo = forge_db::loop_repository::LoopRepository::new(&db);
-    let loops = repo
-        .list()
-        .map_err(|err| format!("list loops from {}: {err}", db_path.display()))?;
-    Ok(loops.len())
+    let loop_repo = forge_db::loop_repository::LoopRepository::new(&db);
+    let queue_repo = forge_db::loop_queue_repository::LoopQueueRepository::new(&db);
+    let run_repo = forge_db::loop_run_repository::LoopRunRepository::new(&db);
+    let profile_repo = forge_db::profile_repository::ProfileRepository::new(&db);
+    let pool_repo = forge_db::pool_repository::PoolRepository::new(&db);
+
+    let loop_rows = match loop_repo.list() {
+        Ok(rows) => rows,
+        Err(err) if is_missing_table(&err, "loops") => {
+            return Ok((Vec::new(), HashMap::new(), HashMap::new()));
+        }
+        Err(err) => return Err(err.to_string()),
+    };
+
+    let profile_map: HashMap<String, (String, String, String)> = match profile_repo.list() {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|profile| {
+                (
+                    profile.id,
+                    (profile.name, profile.harness, profile.auth_kind),
+                )
+            })
+            .collect(),
+        Err(err) if is_missing_table(&err, "profiles") => HashMap::new(),
+        Err(err) => return Err(err.to_string()),
+    };
+
+    let pool_map: HashMap<String, String> = match pool_repo.list() {
+        Ok(rows) => rows.into_iter().map(|pool| (pool.id, pool.name)).collect(),
+        Err(err) if is_missing_table(&err, "pools") => HashMap::new(),
+        Err(err) => return Err(err.to_string()),
+    };
+
+    let mut loops = Vec::new();
+    let mut run_history_by_loop: HashMap<String, Vec<RunView>> = HashMap::new();
+    let mut log_tails_by_loop: HashMap<String, LogTailView> = HashMap::new();
+
+    for loop_row in loop_rows {
+        let queue_depth = match queue_repo.list(&loop_row.id) {
+            Ok(items) => items.iter().filter(|item| item.status == "pending").count(),
+            Err(err) if is_missing_table(&err, "loop_queue_items") => 0,
+            Err(err) => return Err(err.to_string()),
+        };
+
+        let run_rows = match run_repo.list_by_loop(&loop_row.id) {
+            Ok(items) => items,
+            Err(err) if is_missing_table(&err, "loop_runs") => Vec::new(),
+            Err(err) => return Err(err.to_string()),
+        };
+
+        let (profile_name, profile_harness, profile_auth) =
+            match profile_map.get(&loop_row.profile_id) {
+                Some((name, harness, auth)) => (name.clone(), harness.clone(), auth.clone()),
+                None => (loop_row.profile_id.clone(), String::new(), String::new()),
+            };
+        let pool_name = if loop_row.pool_id.is_empty() {
+            String::new()
+        } else {
+            pool_map
+                .get(&loop_row.pool_id)
+                .cloned()
+                .unwrap_or(loop_row.pool_id.clone())
+        };
+
+        loops.push(LoopView {
+            id: loop_row.id.clone(),
+            short_id: loop_row.short_id.clone(),
+            name: loop_row.name.clone(),
+            state: loop_row.state.as_str().to_string(),
+            repo_path: loop_row.repo_path.clone(),
+            runs: run_rows.len(),
+            queue_depth,
+            last_run_at: loop_row.last_run_at.clone(),
+            interval_seconds: loop_row.interval_seconds,
+            max_runtime_seconds: loop_row.max_runtime_seconds,
+            max_iterations: loop_row.max_iterations,
+            last_error: loop_row.last_error.clone(),
+            profile_name: profile_name.clone(),
+            profile_harness: profile_harness.clone(),
+            profile_auth: profile_auth.clone(),
+            profile_id: loop_row.profile_id.clone(),
+            pool_name,
+            pool_id: loop_row.pool_id.clone(),
+        });
+
+        let run_history = run_rows
+            .iter()
+            .take(RUN_HISTORY_LIMIT)
+            .map(|run_row| map_run_view(run_row, &profile_name, &loop_row.profile_id))
+            .collect::<Vec<_>>();
+        if !run_history.is_empty() {
+            run_history_by_loop.insert(loop_row.id.clone(), run_history);
+        }
+
+        let fallback_log = run_rows
+            .first()
+            .map(|run_row| run_output_lines(&run_row.output_tail, LOG_TAIL_MAX_LINES))
+            .unwrap_or_default();
+        let log_tail = match load_log_tail(&loop_row.log_path, &fallback_log) {
+            Ok(log_tail) => log_tail,
+            Err(err) => LogTailView {
+                lines: fallback_log,
+                message: err,
+            },
+        };
+        log_tails_by_loop.insert(loop_row.id.clone(), log_tail);
+    }
+
+    loops.sort_by(|left, right| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    Ok((loops, run_history_by_loop, log_tails_by_loop))
+}
+
+fn map_run_view(
+    run: &forge_db::loop_run_repository::LoopRun,
+    profile_name: &str,
+    profile_id: &str,
+) -> RunView {
+    RunView {
+        id: run.id.clone(),
+        status: run_status_label(&run.status).to_owned(),
+        exit_code: run.exit_code,
+        duration: run_duration_label(run),
+        profile_name: profile_name.to_owned(),
+        profile_id: profile_id.to_owned(),
+        harness: String::new(),
+        auth_kind: String::new(),
+        started_at: run.started_at.clone(),
+        output_lines: run_output_lines(&run.output_tail, LOG_TAIL_MAX_LINES),
+    }
+}
+
+fn run_status_label(status: &forge_db::loop_run_repository::LoopRunStatus) -> &'static str {
+    match status {
+        forge_db::loop_run_repository::LoopRunStatus::Running => "RUNNING",
+        forge_db::loop_run_repository::LoopRunStatus::Success => "SUCCESS",
+        forge_db::loop_run_repository::LoopRunStatus::Error => "ERROR",
+        forge_db::loop_run_repository::LoopRunStatus::Killed => "KILLED",
+    }
+}
+
+fn run_duration_label(run: &forge_db::loop_run_repository::LoopRun) -> String {
+    if matches!(
+        run.status,
+        forge_db::loop_run_repository::LoopRunStatus::Running
+    ) {
+        "running".to_owned()
+    } else if run.finished_at.is_some() {
+        "done".to_owned()
+    } else {
+        "-".to_owned()
+    }
+}
+
+fn run_output_lines(output_tail: &str, max_lines: usize) -> Vec<String> {
+    let mut lines: Vec<String> = output_tail
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    if lines.len() > max_lines {
+        lines = lines[lines.len() - max_lines..].to_vec();
+    }
+    lines
+}
+
+fn load_log_tail(log_path: &str, fallback_lines: &[String]) -> Result<LogTailView, String> {
+    if log_path.trim().is_empty() {
+        return Ok(LogTailView {
+            lines: fallback_lines.to_vec(),
+            message: "No loop log path configured".to_owned(),
+        });
+    }
+    let path = PathBuf::from(log_path);
+    if !path.exists() {
+        return Ok(LogTailView {
+            lines: fallback_lines.to_vec(),
+            message: format!("Log file missing: {}", path.display()),
+        });
+    }
+
+    let mut file = File::open(&path).map_err(|err| format!("open {}: {err}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|err| format!("read metadata {}: {err}", path.display()))?;
+    let len = metadata.len();
+    let start = len.saturating_sub(LOG_TAIL_READ_BYTES);
+    if start > 0 {
+        file.seek(SeekFrom::Start(start))
+            .map_err(|err| format!("seek {}: {err}", path.display()))?;
+    }
+
+    let mut raw = Vec::new();
+    file.read_to_end(&mut raw)
+        .map_err(|err| format!("read {}: {err}", path.display()))?;
+
+    let text = String::from_utf8_lossy(&raw);
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    if start > 0 && !lines.is_empty() {
+        // Discard potentially partial first line from windowed read.
+        lines.remove(0);
+    }
+    if lines.len() > LOG_TAIL_MAX_LINES {
+        lines = lines[lines.len() - LOG_TAIL_MAX_LINES..].to_vec();
+    }
+    Ok(LogTailView {
+        lines,
+        message: format!("tailing {}", path.display()),
+    })
+}
+
+fn is_missing_table(err: &forge_db::DbError, table: &str) -> bool {
+    err.to_string().contains(&format!("no such table: {table}"))
 }
 
 fn unix_timestamp_secs() -> u64 {
@@ -336,15 +802,185 @@ fn unix_timestamp_secs() -> u64 {
         .unwrap_or_default()
 }
 
-fn parse_u16_env(key: &str) -> Option<u16> {
-    std::env::var(key).ok().and_then(|raw| {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            trimmed.parse::<u16>().ok()
+fn run_resume(args: &[String], backend: &mut resume::SqliteResumeBackend) -> (i32, String, String) {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let exit_code = resume::run_with_backend(args, backend, &mut stdout, &mut stderr);
+    (
+        exit_code,
+        String::from_utf8_lossy(&stdout).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+    )
+}
+
+fn run_stop(args: &[String], backend: &mut stop::SqliteStopBackend) -> (i32, String, String) {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let exit_code = stop::run_with_backend(args, backend, &mut stdout, &mut stderr);
+    (
+        exit_code,
+        String::from_utf8_lossy(&stdout).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+    )
+}
+
+fn run_kill(args: &[String], backend: &mut kill::SqliteKillBackend) -> (i32, String, String) {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let exit_code = kill::run_with_backend(args, backend, &mut stdout, &mut stderr);
+    (
+        exit_code,
+        String::from_utf8_lossy(&stdout).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+    )
+}
+
+fn run_rm(args: &[String], backend: &mut rm::SqliteLoopBackend) -> (i32, String, String) {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let exit_code = rm::run_with_backend(args, backend, &mut stdout, &mut stderr);
+    (
+        exit_code,
+        String::from_utf8_lossy(&stdout).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+    )
+}
+
+fn run_up(args: &[String], backend: &mut up::SqliteUpBackend) -> (i32, String, String) {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let exit_code = up::run_with_backend(args, backend, &mut stdout, &mut stderr);
+    (
+        exit_code,
+        String::from_utf8_lossy(&stdout).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+    )
+}
+
+fn build_up_args(wizard: &[(String, String)], spawn_owner: &str) -> Vec<String> {
+    let mut args = vec!["up".to_owned(), "--json".to_owned()];
+    if spawn_owner != "auto" {
+        args.push("--spawn-owner".to_owned());
+        args.push(spawn_owner.to_owned());
+    }
+
+    push_non_empty_pair(&mut args, "--name", wizard_value(wizard, "name"));
+    push_non_empty_pair(
+        &mut args,
+        "--name-prefix",
+        wizard_value(wizard, "name_prefix"),
+    );
+    push_non_empty_pair(&mut args, "--count", wizard_value(wizard, "count"));
+    push_non_empty_pair(&mut args, "--pool", wizard_value(wizard, "pool"));
+    push_non_empty_pair(&mut args, "--profile", wizard_value(wizard, "profile"));
+    push_non_empty_pair(&mut args, "--prompt", wizard_value(wizard, "prompt"));
+    push_non_empty_pair(
+        &mut args,
+        "--prompt-msg",
+        wizard_value(wizard, "prompt_msg"),
+    );
+    push_non_empty_pair(&mut args, "--interval", wizard_value(wizard, "interval"));
+    push_non_empty_pair(
+        &mut args,
+        "--max-runtime",
+        wizard_value(wizard, "max_runtime"),
+    );
+    push_non_empty_pair(
+        &mut args,
+        "--max-iterations",
+        wizard_value(wizard, "max_iterations"),
+    );
+    push_non_empty_pair(&mut args, "--tags", wizard_value(wizard, "tags"));
+    args
+}
+
+fn wizard_value<'a>(wizard: &'a [(String, String)], key: &str) -> Option<&'a String> {
+    wizard
+        .iter()
+        .find(|(entry_key, _)| entry_key == key)
+        .map(|(_, value)| value)
+}
+
+fn push_non_empty_pair(args: &mut Vec<String>, flag: &str, value: Option<&String>) {
+    let Some(raw) = value else {
+        return;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    args.push(flag.to_owned());
+    args.push(trimmed.to_owned());
+}
+
+fn parse_resume_success_message(stdout: &str, loop_id: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(stdout).ok()?;
+    let resumed = value.get("resumed")?.as_bool()?;
+    if !resumed {
+        return None;
+    }
+    let name = value
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(loop_id);
+    let id = value
+        .get("loop_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(loop_id);
+    Some(format!("Loop {name} resumed ({id})"))
+}
+
+fn parse_created_loop_id(db_path: &Path, stdout: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(stdout).ok()?;
+    let entries = value.as_array()?;
+    let first = entries.first()?;
+    let name = first.get("name")?.as_str()?.to_owned();
+
+    if !db_path.exists() {
+        return None;
+    }
+
+    let db = forge_db::Db::open(forge_db::Config::new(db_path)).ok()?;
+    let repo = forge_db::loop_repository::LoopRepository::new(&db);
+    let mut loops = repo.list().ok()?;
+    loops.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    loops
+        .into_iter()
+        .find(|loop_entry| loop_entry.name == name)
+        .map(|loop_entry| loop_entry.id)
+}
+
+fn create_success_message(stdout: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) else {
+        return "Loop created".to_owned();
+    };
+    let Some(entries) = value.as_array() else {
+        return "Loop created".to_owned();
+    };
+    match entries.len() {
+        0 => "Loop created".to_owned(),
+        1 => {
+            let name = entries
+                .first()
+                .and_then(|entry| entry.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("loop");
+            format!("Loop {name} created")
         }
-    })
+        count => format!("Created {count} loops"),
+    }
+}
+
+fn error_from_stderr(action: &str, stderr: &str) -> String {
+    let message = stderr.trim();
+    if message.is_empty() {
+        return format!("{action} failed");
+    }
+    format!("{action} failed: {message}")
+}
+
+fn resolve_spawn_owner() -> String {
+    std::env::var("FORGE_TUI_SPAWN_OWNER").unwrap_or_else(|_| "auto".to_owned())
 }
 
 #[cfg(test)]
@@ -352,9 +988,10 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::{
-        resolve_screen_mode_from_env, translate_runtime_event, ForgeShell, ForgeShellMsg,
-        RuntimeEvent,
+        build_up_args, resolve_screen_mode_from_env, translate_runtime_event, BootstrapSnapshot,
+        ForgeShell, ForgeShellMsg, RuntimeEvent,
     };
+    use crate::app::LoopView;
     use forge_ftui_adapter::input::{
         InputEvent, Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind, MouseWheelDirection,
         ResizeEvent,
@@ -364,7 +1001,9 @@ mod tests {
         Event, KeyCode as FtuiKeyCode, KeyEvent as FtuiKeyEvent, KeyEventKind as FtuiKeyEventKind,
         MouseEvent as FtuiMouseEvent, MouseEventKind as FtuiMouseEventKind,
     };
+    use ftui::render::cell::PackedRgba;
     use ftui::{Cmd, Model, ScreenMode};
+    use std::collections::HashMap;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     #[test]
@@ -420,19 +1059,69 @@ mod tests {
     #[test]
     fn shell_snapshot_completion_updates_state() {
         let mut shell = ForgeShell::new(std::env::temp_dir().join("forge-shell-bootstrap.sqlite"));
-
-        let completion = ForgeShellMsg::SnapshotLoaded(super::BootstrapSnapshot {
-            loop_count: 7,
+        let snapshot = BootstrapSnapshot {
+            loops: vec![LoopView {
+                id: "loop-1".to_owned(),
+                short_id: "l001".to_owned(),
+                name: "demo".to_owned(),
+                state: "running".to_owned(),
+                ..LoopView::default()
+            }],
+            run_history_by_loop: HashMap::new(),
+            log_tails_by_loop: HashMap::new(),
             refreshed_at_epoch_secs: 123,
             error: Some("boom".to_owned()),
-        });
-        let cmd = shell.update(completion);
+        };
+        let cmd = shell.update(ForgeShellMsg::SnapshotLoaded(snapshot));
 
         assert!(matches!(cmd, Cmd::None));
-        assert_eq!(shell.loop_count, 7);
+        assert_eq!(shell.app.loops().len(), 1);
         assert_eq!(shell.refresh_count, 1);
         assert_eq!(shell.last_refreshed_at_epoch_secs, 123);
         assert_eq!(shell.last_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn shell_view_projects_styles_and_hides_cursor() {
+        let mut shell = ForgeShell::new(std::env::temp_dir().join("forge-shell-bootstrap.sqlite"));
+        let snapshot = BootstrapSnapshot {
+            loops: vec![LoopView {
+                id: "loop-1".to_owned(),
+                short_id: "l001".to_owned(),
+                name: "demo".to_owned(),
+                state: "running".to_owned(),
+                ..LoopView::default()
+            }],
+            run_history_by_loop: HashMap::new(),
+            log_tails_by_loop: HashMap::new(),
+            refreshed_at_epoch_secs: 123,
+            error: None,
+        };
+        let _ = shell.update(ForgeShellMsg::SnapshotLoaded(snapshot));
+
+        let mut pool = ftui::GraphemePool::new();
+        let mut frame = ftui::Frame::new(100, 30, &mut pool);
+        shell.view(&mut frame);
+
+        assert!(!frame.cursor_visible);
+        assert_eq!(frame.cursor_position, None);
+
+        let mut has_background_color = false;
+        'outer: for row in 0..frame.height() {
+            for col in 0..frame.width() {
+                let Some(cell) = frame.buffer.get(col, row) else {
+                    continue;
+                };
+                if cell.bg != PackedRgba::TRANSPARENT {
+                    has_background_color = true;
+                    break 'outer;
+                }
+            }
+        }
+        assert!(
+            has_background_color,
+            "view bridge should project non-transparent background styling"
+        );
     }
 
     #[test]
@@ -441,13 +1130,16 @@ mod tests {
             width: 88,
             height: 22,
         });
-        assert_eq!(
-            msg,
+        match msg {
             ForgeShellMsg::Runtime(RuntimeEvent::Input(InputEvent::Resize(ResizeEvent {
-                width: 88,
-                height: 22,
-            })))
-        );
+                width,
+                height,
+            }))) => {
+                assert_eq!(width, 88);
+                assert_eq!(height, 22);
+            }
+            other => panic!("unexpected message from resize event: {other:?}"),
+        }
     }
 
     #[test]
@@ -470,65 +1162,41 @@ mod tests {
     }
 
     #[test]
-    fn screen_mode_defaults_to_inline() {
+    fn build_up_args_maps_wizard_values() {
+        let wizard = vec![
+            ("name".to_owned(), "demo-loop".to_owned()),
+            ("count".to_owned(), "2".to_owned()),
+            ("interval".to_owned(), "45s".to_owned()),
+            ("tags".to_owned(), "alpha,beta".to_owned()),
+            ("profile".to_owned(), "default".to_owned()),
+        ];
+
+        let args = build_up_args(&wizard, "daemon");
+        assert_eq!(
+            args,
+            vec![
+                "up".to_owned(),
+                "--json".to_owned(),
+                "--spawn-owner".to_owned(),
+                "daemon".to_owned(),
+                "--name".to_owned(),
+                "demo-loop".to_owned(),
+                "--count".to_owned(),
+                "2".to_owned(),
+                "--profile".to_owned(),
+                "default".to_owned(),
+                "--interval".to_owned(),
+                "45s".to_owned(),
+                "--tags".to_owned(),
+                "alpha,beta".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn screen_mode_is_always_alt_screen() {
         let _lock = env_lock();
         let _guard = EnvGuard::set("FORGE_TUI_SCREEN_MODE", "inline");
-        let _reset_height = EnvGuard::unset("FORGE_TUI_INLINE_HEIGHT");
-
-        assert_eq!(
-            resolve_screen_mode_from_env(),
-            ScreenMode::Inline { ui_height: 10 }
-        );
-    }
-
-    #[test]
-    fn screen_mode_uses_inline_height_override() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("FORGE_TUI_SCREEN_MODE", "inline");
-        let _height = EnvGuard::set("FORGE_TUI_INLINE_HEIGHT", "14");
-
-        assert_eq!(
-            resolve_screen_mode_from_env(),
-            ScreenMode::Inline { ui_height: 14 }
-        );
-    }
-
-    #[test]
-    fn screen_mode_supports_inline_auto() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("FORGE_TUI_SCREEN_MODE", "inline-auto");
-        let _min = EnvGuard::set("FORGE_TUI_INLINE_MIN_HEIGHT", "7");
-        let _max = EnvGuard::set("FORGE_TUI_INLINE_MAX_HEIGHT", "25");
-
-        assert_eq!(
-            resolve_screen_mode_from_env(),
-            ScreenMode::InlineAuto {
-                min_height: 7,
-                max_height: 25,
-            }
-        );
-    }
-
-    #[test]
-    fn screen_mode_inline_auto_clamps_bad_bounds() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("FORGE_TUI_SCREEN_MODE", "auto");
-        let _min = EnvGuard::set("FORGE_TUI_INLINE_MIN_HEIGHT", "30");
-        let _max = EnvGuard::set("FORGE_TUI_INLINE_MAX_HEIGHT", "10");
-
-        assert_eq!(
-            resolve_screen_mode_from_env(),
-            ScreenMode::InlineAuto {
-                min_height: 30,
-                max_height: 30,
-            }
-        );
-    }
-
-    #[test]
-    fn screen_mode_supports_alt_screen() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("FORGE_TUI_SCREEN_MODE", "altscreen");
         assert_eq!(resolve_screen_mode_from_env(), ScreenMode::AltScreen);
     }
 
@@ -550,15 +1218,6 @@ mod tests {
         fn set(key: &str, value: &str) -> Self {
             let previous = std::env::var(key).ok();
             std::env::set_var(key, value);
-            Self {
-                key: key.to_owned(),
-                previous,
-            }
-        }
-
-        fn unset(key: &str) -> Self {
-            let previous = std::env::var(key).ok();
-            std::env::remove_var(key);
             Self {
                 key: key.to_owned(),
                 previous,

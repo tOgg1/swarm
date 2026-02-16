@@ -102,9 +102,9 @@ try:
     out_path.write_text(text, encoding="utf-8")
 
     required = [
-        "Forge TUI | FrankenTUI bootstrap",
-        "last-event:",
-        "last-action:",
+        "Forge Loops",
+        "1:Overview",
+        "5:Inbox",
     ]
     for marker in required:
         if marker not in text:

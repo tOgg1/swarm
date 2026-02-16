@@ -4848,41 +4848,29 @@ impl App {
                     );
                     blit_frame(&mut frame, &view_frame, 0, content_start);
                 } else if self.mode == UiMode::Main && self.tab == MainTab::Overview {
-                    let overview_frame = crate::panel_error_boundary::render_panel_with_boundary(
-                        MainTab::Overview.label(),
+                    let mut overview_frame = RenderFrame::new(
                         FrameSize {
                             width,
                             height: content_height,
                         },
                         theme,
+                    );
+                    crate::overview_tab::render_overview_paneled_with_options(
+                        &mut overview_frame,
+                        &self.loops,
+                        self.selected_view(),
+                        &self.run_history,
+                        self.selected_run,
                         &pal,
-                        || {
-                            let mut pane_frame = RenderFrame::new(
-                                FrameSize {
-                                    width,
-                                    height: content_height,
-                                },
-                                theme,
-                            );
-                            crate::overview_tab::render_overview_paneled_with_options(
-                                &mut pane_frame,
-                                &self.loops,
-                                self.selected_view(),
-                                &self.run_history,
-                                self.selected_run,
-                                &pal,
-                                Rect {
-                                    x: 0,
-                                    y: 0,
-                                    width,
-                                    height: content_height,
-                                },
-                                self.focus_right,
-                                crate::overview_tab::OverviewPaneOptions {
-                                    reserve_next_action_slot: true,
-                                },
-                            );
-                            pane_frame
+                        Rect {
+                            x: 0,
+                            y: 0,
+                            width,
+                            height: content_height,
+                        },
+                        self.focus_right,
+                        crate::overview_tab::OverviewPaneOptions {
+                            reserve_next_action_slot: true,
                         },
                     );
                     blit_frame(&mut frame, &overview_frame, 0, content_start);
