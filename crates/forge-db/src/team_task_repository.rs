@@ -410,7 +410,11 @@ impl<'a> TeamTaskRepository<'a> {
         )
     }
 
-    pub fn retry(&self, task_id: &str, actor: Option<&str>) -> Result<(TeamTask, TeamTask), DbError> {
+    pub fn retry(
+        &self,
+        task_id: &str,
+        actor: Option<&str>,
+    ) -> Result<(TeamTask, TeamTask), DbError> {
         let source = self.get(task_id)?;
         let source_status = TeamTaskStatus::parse(source.status.trim())?;
         if !source_status.is_terminal() {
@@ -658,7 +662,11 @@ impl<'a> TeamTaskService<'a> {
         self.repo.fail(task_id, actor, detail)
     }
 
-    pub fn retry(&self, task_id: &str, actor: Option<&str>) -> Result<(TeamTask, TeamTask), DbError> {
+    pub fn retry(
+        &self,
+        task_id: &str,
+        actor: Option<&str>,
+    ) -> Result<(TeamTask, TeamTask), DbError> {
         self.repo.retry(task_id, actor)
     }
 }
