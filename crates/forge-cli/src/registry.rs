@@ -1185,7 +1185,9 @@ mod tests {
         let store = seed_store();
         let out = run_for_test(&["registry", "ls", "agents", "prompts"], &store);
         assert_eq!(out.exit_code, 1);
-        assert!(out.stderr.contains("usage: forge registry ls [all|agents|prompts]"));
+        assert!(out
+            .stderr
+            .contains("usage: forge registry ls [all|agents|prompts]"));
         cleanup(&store);
     }
 
@@ -1194,7 +1196,9 @@ mod tests {
         let store = seed_store();
         let out = run_for_test(&["registry", "--json", "--jsonl", "status"], &store);
         assert_eq!(out.exit_code, 1);
-        assert!(out.stderr.contains("--json and --jsonl are mutually exclusive"));
+        assert!(out
+            .stderr
+            .contains("--json and --jsonl are mutually exclusive"));
         cleanup(&store);
     }
 }

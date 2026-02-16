@@ -909,6 +909,8 @@ mod tests {
         let store = MeshStore::with_path(path);
         let out = run_for_test(&["mesh", "--json", "--jsonl", "status"], &store);
         assert_eq!(out.exit_code, 1);
-        assert!(out.stderr.contains("--json and --jsonl are mutually exclusive"));
+        assert!(out
+            .stderr
+            .contains("--json and --jsonl are mutually exclusive"));
     }
 }

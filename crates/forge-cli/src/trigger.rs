@@ -387,7 +387,9 @@ mod tests {
         let store = temp_store("json-conflict");
         let out = run_for_test(&["trigger", "--json", "--jsonl", "ls"], &store);
         assert_eq!(out.exit_code, 1);
-        assert!(out.stderr.contains("--json and --jsonl are mutually exclusive"));
+        assert!(out
+            .stderr
+            .contains("--json and --jsonl are mutually exclusive"));
         cleanup(&store);
     }
 }
