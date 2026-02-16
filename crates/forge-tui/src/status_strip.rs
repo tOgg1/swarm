@@ -867,7 +867,8 @@ mod tests {
         let registry = StatusWidgetRegistry::with_builtins();
         let mut store = default_status_strip_store(&registry);
 
-        if let Err(err) = move_widget_slot(&mut store, "queue_depth", StripPosition::Top, 1, &registry)
+        if let Err(err) =
+            move_widget_slot(&mut store, "queue_depth", StripPosition::Top, 1, &registry)
         {
             panic!("move queue widget to top should succeed: {err}");
         }

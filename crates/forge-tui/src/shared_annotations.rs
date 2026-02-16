@@ -181,9 +181,7 @@ mod tests {
             Ok(id) => id,
             Err(err) => panic!("add should succeed: {err}"),
         };
-        if let Err(err) =
-            store.update_annotation(&id, "new body", &["follow-up".to_owned()], 180)
-        {
+        if let Err(err) = store.update_annotation(&id, "new body", &["follow-up".to_owned()], 180) {
             panic!("update should succeed: {err}");
         }
 

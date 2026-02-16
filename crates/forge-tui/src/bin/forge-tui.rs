@@ -628,7 +628,10 @@ mod tests {
         ok_or_panic(db.migrate_up(), "migrate db");
 
         let team_service = TeamService::new(&db);
-        let team = ok_or_panic(team_service.create_team("ops", "{}", "", 300), "create team");
+        let team = ok_or_panic(
+            team_service.create_team("ops", "{}", "", 300),
+            "create team",
+        );
         ok_or_panic(
             team_service.add_member(&team.id, "agent-lead", TeamRole::Leader),
             "add team leader",
@@ -636,7 +639,11 @@ mod tests {
 
         let task_service = TeamTaskService::new(&db);
         ok_or_panic(
-            task_service.submit(&team.id, r#"{"type":"incident","title":"database outage"}"#, 5),
+            task_service.submit(
+                &team.id,
+                r#"{"type":"incident","title":"database outage"}"#,
+                5,
+            ),
             "submit queued task",
         );
         let assigned = ok_or_panic(

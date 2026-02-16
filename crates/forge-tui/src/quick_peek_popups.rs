@@ -390,11 +390,11 @@ mod tests {
 
     #[test]
     fn loop_peek_contains_health_task_and_output() {
-        let popup = match build_quick_peek_popup(&PeekEntityRef::loop_id("LOOP-A"), &sample_catalog())
-        {
-            Some(popup) => popup,
-            None => panic!("loop popup should exist"),
-        };
+        let popup =
+            match build_quick_peek_popup(&PeekEntityRef::loop_id("LOOP-A"), &sample_catalog()) {
+                Some(popup) => popup,
+                None => panic!("loop popup should exist"),
+            };
         assert_eq!(popup.title, "Loop loop-a");
         assert!(popup
             .lines
@@ -412,11 +412,11 @@ mod tests {
 
     #[test]
     fn task_peek_contains_status_assignee_description() {
-        let popup = match build_quick_peek_popup(&PeekEntityRef::task_id("forge-6ad"), &sample_catalog())
-        {
-            Some(popup) => popup,
-            None => panic!("task popup should exist"),
-        };
+        let popup =
+            match build_quick_peek_popup(&PeekEntityRef::task_id("forge-6ad"), &sample_catalog()) {
+                Some(popup) => popup,
+                None => panic!("task popup should exist"),
+            };
         assert_eq!(popup.title, "Task forge-6ad");
         assert!(popup
             .lines
