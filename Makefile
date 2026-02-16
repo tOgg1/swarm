@@ -23,6 +23,7 @@ BINARY_CLI := forge
 BINARY_DAEMON := forged
 BINARY_RUNNER := forge-agent-runner
 BINARY_FMAIL := fmail
+BINARY_TUI := forge-tui
 RUST_BINARY_CLI := rforge
 RUST_BINARY_DAEMON := rforged
 RUST_BINARY_FMAIL := rfmail
@@ -51,7 +52,7 @@ RUST_INSTALL_DIR ?= $(LOCAL_BIN_DIR)
 # Platforms for cross-compilation
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: all build go-layout-guard build-cli build-daemon build-runner build-fmail build-rust build-rust-cli build-rust-daemon build-rust-fmail clean test lint fmt vet tidy install install-local install-system install-rust install-rust-system uninstall uninstall-rust uninstall-rust-system dev help proto proto-lint rust-daemon-runtime-parity
+.PHONY: all build go-layout-guard build-cli build-daemon build-runner build-fmail build-tui build-rust build-rust-cli build-rust-daemon build-rust-fmail build-rust-tui clean test lint fmt vet tidy install install-local install-system install-rust install-rust-system uninstall uninstall-rust uninstall-rust-system dev help proto proto-lint rust-daemon-runtime-parity forged-launchd-install forged-launchd-uninstall forged-launchd-status
 .PHONY: perf-smoke perf-bench
 
 # Default target
@@ -60,7 +61,7 @@ all: build
 ## Build targets
 
 # Build both binaries
-build: go-layout-guard build-cli build-daemon build-runner build-fmail
+build: go-layout-guard build-cli build-daemon build-runner build-fmail build-tui
 
 # Guard against partial Go source tree moves during rust rewrite staging.
 go-layout-guard:
@@ -114,6 +115,13 @@ else
 	@cd $(GO_SRC_DIR) && $(GOBUILD) $(LDFLAGS) -o $(abspath $(BUILD_DIR))/$(BINARY_FMAIL) $(CMD_FMAIL)
 endif
 
+# Build the dedicated forge TUI binary
+build-tui:
+	@echo "Building $(BINARY_TUI)..."
+	@mkdir -p $(BUILD_DIR)
+	@cd $(RUST_DIR) && $(RUST_META_ENV) cargo build --release -p forge-tui --bin $(BINARY_TUI)
+	@cp $(RUST_DIR)/target/release/$(BINARY_TUI) $(BUILD_DIR)/$(BINARY_TUI)
+
 # Build for all platforms
 build-all:
 ifeq ($(RUST_FIRST),1)
@@ -133,7 +141,7 @@ endif
 
 ## Rust build targets (side-by-side; non-conflicting binaries)
 
-build-rust: build-rust-cli build-rust-daemon build-rust-fmail
+build-rust: build-rust-cli build-rust-daemon build-rust-fmail build-rust-tui
 
 build-rust-cli:
 	@echo "Building $(RUST_BINARY_CLI) (Rust)..."
@@ -152,6 +160,12 @@ build-rust-fmail:
 	@mkdir -p $(BUILD_DIR)
 	@cd $(RUST_DIR) && $(RUST_META_ENV) cargo build --release -p fmail-cli --bin $(RUST_BINARY_FMAIL)
 	@cp $(RUST_DIR)/target/release/$(RUST_BINARY_FMAIL) $(BUILD_DIR)/$(RUST_BINARY_FMAIL)
+
+build-rust-tui:
+	@echo "Building $(BINARY_TUI) (Rust)..."
+	@mkdir -p $(BUILD_DIR)
+	@cd $(RUST_DIR) && $(RUST_META_ENV) cargo build --release -p forge-tui --bin $(BINARY_TUI)
+	@cp $(RUST_DIR)/target/release/$(BINARY_TUI) $(BUILD_DIR)/$(BINARY_TUI)
 
 ## Development targets
 
@@ -174,7 +188,9 @@ install: build
 	@mv $(INSTALL_DIR)/.$(BINARY_RUNNER).tmp $(INSTALL_DIR)/$(BINARY_RUNNER)
 	@install -m 755 $(BUILD_DIR)/$(BINARY_FMAIL) $(INSTALL_DIR)/.$(BINARY_FMAIL).tmp
 	@mv $(INSTALL_DIR)/.$(BINARY_FMAIL).tmp $(INSTALL_DIR)/$(BINARY_FMAIL)
-	@echo "Installed $(BINARY_CLI), $(BINARY_DAEMON), $(BINARY_RUNNER), and $(BINARY_FMAIL) to $(INSTALL_DIR)"
+	@install -m 755 $(BUILD_DIR)/$(BINARY_TUI) $(INSTALL_DIR)/.$(BINARY_TUI).tmp
+	@mv $(INSTALL_DIR)/.$(BINARY_TUI).tmp $(INSTALL_DIR)/$(BINARY_TUI)
+	@echo "Installed $(BINARY_CLI), $(BINARY_DAEMON), $(BINARY_RUNNER), $(BINARY_FMAIL), and $(BINARY_TUI) to $(INSTALL_DIR)"
 	@echo ""
 	@echo "Make sure $(INSTALL_DIR) is in your PATH:"
 	@echo "  export PATH=\"\$$PATH:$(INSTALL_DIR)\""
@@ -190,7 +206,8 @@ install-system: build
 	@install -m 755 $(BUILD_DIR)/$(BINARY_DAEMON) $(BINDIR)/$(BINARY_DAEMON)
 	@install -m 755 $(BUILD_DIR)/$(BINARY_RUNNER) $(BINDIR)/$(BINARY_RUNNER)
 	@install -m 755 $(BUILD_DIR)/$(BINARY_FMAIL) $(BINDIR)/$(BINARY_FMAIL)
-	@echo "Installed $(BINARY_CLI), $(BINARY_DAEMON), $(BINARY_RUNNER), and $(BINARY_FMAIL) to $(BINDIR)"
+	@install -m 755 $(BUILD_DIR)/$(BINARY_TUI) $(BINDIR)/$(BINARY_TUI)
+	@echo "Installed $(BINARY_CLI), $(BINARY_DAEMON), $(BINARY_RUNNER), $(BINARY_FMAIL), and $(BINARY_TUI) to $(BINDIR)"
 
 install-rust: build-rust
 	@echo "Installing Rust side-by-side binaries to $(RUST_INSTALL_DIR)..."
@@ -201,7 +218,9 @@ install-rust: build-rust
 	@mv $(RUST_INSTALL_DIR)/.$(RUST_BINARY_DAEMON).tmp $(RUST_INSTALL_DIR)/$(RUST_BINARY_DAEMON)
 	@install -m 755 $(BUILD_DIR)/$(RUST_BINARY_FMAIL) $(RUST_INSTALL_DIR)/.$(RUST_BINARY_FMAIL).tmp
 	@mv $(RUST_INSTALL_DIR)/.$(RUST_BINARY_FMAIL).tmp $(RUST_INSTALL_DIR)/$(RUST_BINARY_FMAIL)
-	@echo "Installed $(RUST_BINARY_CLI), $(RUST_BINARY_DAEMON), and $(RUST_BINARY_FMAIL) to $(RUST_INSTALL_DIR)"
+	@install -m 755 $(BUILD_DIR)/$(BINARY_TUI) $(RUST_INSTALL_DIR)/.$(BINARY_TUI).tmp
+	@mv $(RUST_INSTALL_DIR)/.$(BINARY_TUI).tmp $(RUST_INSTALL_DIR)/$(BINARY_TUI)
+	@echo "Installed $(RUST_BINARY_CLI), $(RUST_BINARY_DAEMON), $(RUST_BINARY_FMAIL), and $(BINARY_TUI) to $(RUST_INSTALL_DIR)"
 
 install-rust-system: build-rust
 	@echo "Installing Rust side-by-side binaries to $(BINDIR) (may require sudo)..."
@@ -209,7 +228,8 @@ install-rust-system: build-rust
 	@install -m 755 $(BUILD_DIR)/$(RUST_BINARY_CLI) $(BINDIR)/$(RUST_BINARY_CLI)
 	@install -m 755 $(BUILD_DIR)/$(RUST_BINARY_DAEMON) $(BINDIR)/$(RUST_BINARY_DAEMON)
 	@install -m 755 $(BUILD_DIR)/$(RUST_BINARY_FMAIL) $(BINDIR)/$(RUST_BINARY_FMAIL)
-	@echo "Installed $(RUST_BINARY_CLI), $(RUST_BINARY_DAEMON), and $(RUST_BINARY_FMAIL) to $(BINDIR)"
+	@install -m 755 $(BUILD_DIR)/$(BINARY_TUI) $(BINDIR)/$(BINARY_TUI)
+	@echo "Installed $(RUST_BINARY_CLI), $(RUST_BINARY_DAEMON), $(RUST_BINARY_FMAIL), and $(BINARY_TUI) to $(BINDIR)"
 
 # Uninstall from local bin dir
 uninstall:
@@ -218,14 +238,16 @@ uninstall:
 	@rm -f $(INSTALL_DIR)/$(BINARY_DAEMON)
 	@rm -f $(INSTALL_DIR)/$(BINARY_RUNNER)
 	@rm -f $(INSTALL_DIR)/$(BINARY_FMAIL)
-	@echo "Removed $(BINARY_CLI), $(BINARY_DAEMON), $(BINARY_RUNNER), and $(BINARY_FMAIL) from $(INSTALL_DIR)"
+	@rm -f $(INSTALL_DIR)/$(BINARY_TUI)
+	@echo "Removed $(BINARY_CLI), $(BINARY_DAEMON), $(BINARY_RUNNER), $(BINARY_FMAIL), and $(BINARY_TUI) from $(INSTALL_DIR)"
 
 uninstall-rust:
 	@echo "Removing Rust side-by-side binaries from $(RUST_INSTALL_DIR)..."
 	@rm -f $(RUST_INSTALL_DIR)/$(RUST_BINARY_CLI)
 	@rm -f $(RUST_INSTALL_DIR)/$(RUST_BINARY_DAEMON)
 	@rm -f $(RUST_INSTALL_DIR)/$(RUST_BINARY_FMAIL)
-	@echo "Removed $(RUST_BINARY_CLI), $(RUST_BINARY_DAEMON), and $(RUST_BINARY_FMAIL) from $(RUST_INSTALL_DIR)"
+	@rm -f $(RUST_INSTALL_DIR)/$(BINARY_TUI)
+	@echo "Removed $(RUST_BINARY_CLI), $(RUST_BINARY_DAEMON), $(RUST_BINARY_FMAIL), and $(BINARY_TUI) from $(RUST_INSTALL_DIR)"
 
 # Uninstall from system
 uninstall-system:
@@ -234,14 +256,25 @@ uninstall-system:
 	@rm -f $(BINDIR)/$(BINARY_DAEMON)
 	@rm -f $(BINDIR)/$(BINARY_RUNNER)
 	@rm -f $(BINDIR)/$(BINARY_FMAIL)
-	@echo "Removed $(BINARY_CLI), $(BINARY_DAEMON), $(BINARY_RUNNER), and $(BINARY_FMAIL) from $(BINDIR)"
+	@rm -f $(BINDIR)/$(BINARY_TUI)
+	@echo "Removed $(BINARY_CLI), $(BINARY_DAEMON), $(BINARY_RUNNER), $(BINARY_FMAIL), and $(BINARY_TUI) from $(BINDIR)"
 
 uninstall-rust-system:
 	@echo "Removing Rust side-by-side binaries from $(BINDIR) (may require sudo)..."
 	@rm -f $(BINDIR)/$(RUST_BINARY_CLI)
 	@rm -f $(BINDIR)/$(RUST_BINARY_DAEMON)
 	@rm -f $(BINDIR)/$(RUST_BINARY_FMAIL)
-	@echo "Removed $(RUST_BINARY_CLI), $(RUST_BINARY_DAEMON), and $(RUST_BINARY_FMAIL) from $(BINDIR)"
+	@rm -f $(BINDIR)/$(BINARY_TUI)
+	@echo "Removed $(RUST_BINARY_CLI), $(RUST_BINARY_DAEMON), $(RUST_BINARY_FMAIL), and $(BINARY_TUI) from $(BINDIR)"
+
+forged-launchd-install:
+	@scripts/install-macos-forged-launchagent.sh install
+
+forged-launchd-uninstall:
+	@scripts/install-macos-forged-launchagent.sh uninstall
+
+forged-launchd-status:
+	@scripts/install-macos-forged-launchagent.sh status
 
 # Install using go install (builds and installs in one step)
 go-install:
@@ -370,12 +403,13 @@ help:
 	@echo "  make [target]"
 	@echo ""
 	@echo "Build Targets:"
-	@echo "  build          Build both CLI and daemon binaries to ./build/"
+	@echo "  build          Build CLI/daemon/runner/fmail/tui binaries to ./build/"
 	@echo "  go-layout-guard Validate expected Go source layout for the current migration stage"
 	@echo "  build-cli      Build only the CLI/TUI binary"
 	@echo "  build-daemon   Build only the daemon binary"
+	@echo "  build-tui      Build only the dedicated forge-tui binary"
 	@echo "  build-all      Build for all platforms (cross-compile)"
-	@echo "  build-rust     Build Rust side-by-side binaries to ./build/ (rforge, rforged, rfmail)"
+	@echo "  build-rust     Build Rust binaries to ./build/ (rforge, rforged, rfmail, forge-tui)"
 	@echo "  clean          Remove build artifacts"
 	@echo ""
 	@echo "Install Targets:"
@@ -389,6 +423,9 @@ help:
 	@echo "  uninstall-system Remove from /usr/local/bin (requires sudo)"
 	@echo "  uninstall-rust Remove Rust side-by-side binaries from RUST_INSTALL_DIR"
 	@echo "  uninstall-rust-system Remove Rust side-by-side binaries from /usr/local/bin (requires sudo)"
+	@echo "  forged-launchd-install Install per-user forged LaunchAgent (macOS)"
+	@echo "  forged-launchd-uninstall Uninstall per-user forged LaunchAgent (macOS)"
+	@echo "  forged-launchd-status Show per-user forged LaunchAgent status (macOS)"
 	@echo ""
 	@echo "Development Targets:"
 	@echo "  dev            Run the CLI without building"
