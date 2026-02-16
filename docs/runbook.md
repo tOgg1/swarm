@@ -182,8 +182,34 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now forged
 ```
 
-Note: `forged` is still a stub in this repo; enable this only when you are
-ready to run the daemon on the node.
+## forged launchd service (macOS, optional)
+
+For macOS login auto-start, install a per-user LaunchAgent:
+
+```bash
+scripts/install-macos-forged-launchagent.sh install
+```
+
+Optional immediate bootstrap (without waiting for next login):
+
+```bash
+scripts/install-macos-forged-launchagent.sh install --start-now
+```
+
+Status and uninstall:
+
+```bash
+scripts/install-macos-forged-launchagent.sh status
+scripts/install-macos-forged-launchagent.sh uninstall
+```
+
+Make shortcuts:
+
+```bash
+make forged-launchd-install
+make forged-launchd-status
+make forged-launchd-uninstall
+```
 
 ## Secure remote access (SSH port forwarding)
 
