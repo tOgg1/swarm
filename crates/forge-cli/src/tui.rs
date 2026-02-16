@@ -1,4 +1,5 @@
 use std::io::{IsTerminal, Write};
+use std::path::Path;
 use std::process::Command;
 
 use serde::Serialize;
@@ -52,12 +53,39 @@ pub struct ProcessTuiBackend {
 impl Default for ProcessTuiBackend {
     fn default() -> Self {
         let non_interactive = !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal();
-        let tui_bin = std::env::var("FORGE_TUI_BIN").unwrap_or_else(|_| "forge-tui".to_string());
+        let tui_bin = resolve_tui_binary();
         Self {
             non_interactive,
             tui_bin,
         }
     }
+}
+
+fn resolve_tui_binary() -> String {
+    let override_bin = std::env::var("FORGE_TUI_BIN").ok();
+    let current_exe = std::env::current_exe().ok();
+    resolve_tui_binary_with(override_bin.as_deref(), current_exe.as_deref())
+}
+
+fn resolve_tui_binary_with(override_bin: Option<&str>, current_exe: Option<&Path>) -> String {
+    if let Some(override_bin) = override_bin {
+        let trimmed = override_bin.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    let sibling_name = format!("forge-tui{}", std::env::consts::EXE_SUFFIX);
+    if let Some(current_exe) = current_exe {
+        if let Some(dir) = current_exe.parent() {
+            let sibling = dir.join(sibling_name);
+            if sibling.is_file() {
+                return sibling.to_string_lossy().to_string();
+            }
+        }
+    }
+
+    "forge-tui".to_string()
 }
 
 impl TuiBackend for ProcessTuiBackend {
@@ -316,6 +344,7 @@ fn write_help(out: &mut dyn Write) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn parse_json_or_panic(raw: &str, context: &str) -> serde_json::Value {
         match serde_json::from_str(raw) {
@@ -454,8 +483,10 @@ mod tests {
             parsed["error"]["message"],
             "TUI requires an interactive terminal"
         );
-        assert!(str_or_panic(parsed["error"]["hint"].as_str(), "hint present")
-            .contains("non-interactive"));
+        assert!(
+            str_or_panic(parsed["error"]["hint"].as_str(), "hint present")
+                .contains("non-interactive")
+        );
         assert_eq!(parsed["error"]["next_step"], "forge --help");
         assert!(out.stderr.is_empty());
     }
@@ -517,5 +548,49 @@ mod tests {
         let out = run_for_test(&["tui", "--json", "--jsonl"], &backend);
         assert_eq!(out.exit_code, 1);
         assert!(out.stderr.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn resolve_tui_binary_uses_override_when_set() {
+        let resolved = resolve_tui_binary_with(Some("custom-tui"), None);
+        assert_eq!(resolved, "custom-tui");
+    }
+
+    #[test]
+    fn resolve_tui_binary_prefers_sibling_binary() {
+        let base = std::env::temp_dir().join(format!(
+            "forge-cli-tui-resolve-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        ));
+        let bin_dir = base.join("bin");
+        if let Err(err) = fs::create_dir_all(&bin_dir) {
+            panic!("create temp dir: {err}");
+        }
+
+        let current_exe = bin_dir.join("forge");
+        if let Err(err) = fs::write(&current_exe, b"") {
+            panic!("write fake current exe: {err}");
+        }
+
+        let sibling_name = format!("forge-tui{}", std::env::consts::EXE_SUFFIX);
+        let sibling = bin_dir.join(sibling_name);
+        if let Err(err) = fs::write(&sibling, b"") {
+            panic!("write sibling tui: {err}");
+        }
+
+        let resolved = resolve_tui_binary_with(None, Some(current_exe.as_path()));
+        assert_eq!(resolved, sibling.to_string_lossy().to_string());
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn resolve_tui_binary_falls_back_to_path_lookup() {
+        let resolved = resolve_tui_binary_with(None, None);
+        assert_eq!(resolved, "forge-tui");
     }
 }
